@@ -1,0 +1,68 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.so
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+.env/
+virtualenv/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+*.env
+!.env.example
+
+# ── FastAPI / Uvicorn ─────────────────────────────────────────────────────────
+*.log
+
+# ── Snapshots (camera captures — can be large) ───────────────────────────────
+snapshots/
+/var/sentra/snapshots/
+
+# ── Distribution / packaging ──────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+.eggs/
+wheels/
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+nosetests.xml
+coverage.xml
+*.coveragerc
+
+# ── Type checking ─────────────────────────────────────────────────────────────
+.mypy_cache/
+.pytype/
+.pyre/
+
+# ── IDE / Editor ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Raspberry Pi specific ─────────────────────────────────────────────────────
+*.pid
+pigpio.log
+
+# ── SQLite (if you add persistence later) ────────────────────────────────────
+*.db
+*.sqlite3
