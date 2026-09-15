@@ -3,6 +3,8 @@ SENTRA Backend — Global Configuration
 All tunable constants and environment variables live here.
 """
 
+import os
+
 from pydantic_settings import BaseSettings
 
 
@@ -30,7 +32,7 @@ class Settings(BaseSettings):
     default_speed_multiplier: float = 0.5
 
     # Camera
-    camera_snapshot_dir: str = "/var/sentra/snapshots"
+    camera_snapshot_dir: str = os.path.expanduser("~/sentra_snapshots")
     mjpeg_quality: int = 80
     mjpeg_fps: int = 30
 
