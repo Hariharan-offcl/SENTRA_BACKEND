@@ -19,8 +19,8 @@ except ImportError:
 # ── Hardware Pin Configuration (from harware/motor_driver.py) ───────────────
 # Left Motor (A)
 ENA, IN1, IN2 = 12, 17, 27
-# Right Motor (B) - Reverted to exact match of ROS2 hardware file
-ENB, IN3, IN4 = 13, 22, 23
+# Right Motor (B) - Flipped IN3/IN4 to match Left side polarity
+ENB, IN3, IN4 = 13, 23, 22
 
 # Shared in-memory state
 _state = {
