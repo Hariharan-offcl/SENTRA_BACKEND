@@ -17,10 +17,10 @@ except ImportError:
     logger.warning("lgpio not found. Motor commands will be simulated (dev mode).")
 
 # ── Hardware Pin Configuration (from harware/motor_driver.py) ───────────────
-# Left Motor (A)
-ENA, IN1, IN2 = 12, 17, 27
-# Right Motor (B) - Flipped IN3/IN4 to match Left side polarity
-ENB, IN3, IN4 = 13, 23, 22
+# Left Motor (A) - Flipped to drive Forward
+ENA, IN1, IN2 = 12, 27, 17
+# Right Motor (B) - Flipped to drive Forward
+ENB, IN3, IN4 = 13, 22, 23
 
 # Shared in-memory state
 _state = {
