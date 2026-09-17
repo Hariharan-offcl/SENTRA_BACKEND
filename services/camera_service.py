@@ -57,60 +57,73 @@ def _try_opencv():
     return None, None
 
 
+import threading
+
+_global_cam = None
+_global_backend = None
+_cam_lock = threading.Lock()
+
+def _get_global_camera():
+    global _global_cam, _global_backend
+    if _global_cam is None:
+        _global_cam, _global_backend = _try_picamera2()
+        if _global_cam is None:
+            _global_cam, _global_backend = _try_opencv()
+        logger.info("Initialized global camera backend: %s", _global_backend or "synthetic")
+    return _global_cam, _global_backend
+
+
 def mjpeg_frame_generator(quality: int = 80):
     """
     Generator that yields raw MJPEG multipart frames.
     Consumed by FastAPI StreamingResponse.
     """
-    cam, backend = _try_picamera2()
-    if cam is None:
-        cam, backend = _try_opencv()
-
-    logger.info("Camera backend: %s", backend or "synthetic")
-
     try:
         while True:
             frame_bytes = None
+            
+            with _cam_lock:
+                cam, backend = _get_global_camera()
+    
+                if backend == "picamera2":
+                    import cv2  # type: ignore
+                    arr = cam.capture_array()
+                    # Picamera2 returns RGB by default, OpenCV expects BGR for JPEG encoding
+                    arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+                    _, buf = cv2.imencode(".jpg", arr, [cv2.IMWRITE_JPEG_QUALITY, quality])
+                    frame_bytes = buf.tobytes()
+    
+                elif backend == "opencv":
+                    import cv2  # type: ignore
+                    ret, frame = cam.read()
+                    if ret:
+                        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+                        frame_bytes = buf.tobytes()
+                    else:
+                        frame_bytes = b""
+    
+                else:
+                    # Synthetic grey frame for headless development
+                    import cv2  # type: ignore
+                    import numpy as np
+                    synthetic = np.full((480, 640, 3), 30, dtype=np.uint8)
+                    cv2.putText(
+                        synthetic, f"SENTRA CAMERA - NO DEVICE  {time.strftime('%H:%M:%S')}",
+                        (30, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
+                    )
+                    _, buf = cv2.imencode(".jpg", synthetic, [cv2.IMWRITE_JPEG_QUALITY, quality])
+                    frame_bytes = buf.tobytes()
 
-            if backend == "picamera2":
-                import cv2  # type: ignore
-                import numpy as np
-                arr = cam.capture_array()
-                # Picamera2 returns RGB by default, OpenCV expects BGR for JPEG encoding
-                arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-                _, buf = cv2.imencode(".jpg", arr, [cv2.IMWRITE_JPEG_QUALITY, quality])
-                frame_bytes = buf.tobytes()
-
-            elif backend == "opencv":
-                import cv2  # type: ignore
-                ret, frame = cam.read()
-                if not ret:
-                    break
-                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-                frame_bytes = buf.tobytes()
-
-            else:
-                # Synthetic grey frame for headless development
-                import cv2  # type: ignore
-                import numpy as np
-                synthetic = np.full((480, 640, 3), 30, dtype=np.uint8)
-                cv2.putText(
-                    synthetic, f"SENTRA CAMERA — NO DEVICE  {time.strftime('%H:%M:%S')}",
-                    (30, 240), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
+            if frame_bytes:
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
                 )
-                _, buf = cv2.imencode(".jpg", synthetic, [cv2.IMWRITE_JPEG_QUALITY, quality])
-                frame_bytes = buf.tobytes()
+            
+            time.sleep(0.03) # Cap at ~30 FPS to prevent locking the camera too tightly
 
-            yield (
-                b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
-            )
-
-    finally:
-        if backend == "picamera2":
-            cam.stop()
-        elif backend == "opencv":
-            cam.release()
+    except Exception as e:
+        logger.error(f"Stream error: {e}")
 
 
 # ── Snapshot ──────────────────────────────────────────────────────────────────
