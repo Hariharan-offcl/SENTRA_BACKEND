@@ -33,17 +33,12 @@ def _try_picamera2():
     """Attempt to import and initialise Picamera2 (Pi only)."""
     try:
         from picamera2 import Picamera2  # type: ignore
-        # Try port 0 (CAM0), then port 1 (CAM1)
-        for cam_id in [0, 1]:
-            try:
-                cam = Picamera2(camera=cam_id)
-                cam.configure(cam.create_video_configuration(main={"size": (1280, 720)}))
-                cam.start()
-                return cam, "picamera2"
-            except Exception:
-                continue
-        return None, None
-    except Exception:
+        cam = Picamera2()
+        cam.configure(cam.create_video_configuration(main={"size": (1280, 720)}))
+        cam.start()
+        return cam, "picamera2"
+    except Exception as e:
+        logger.error(f"Picamera2 failed to initialize: {e}", exc_info=True)
         return None, None
 
 
