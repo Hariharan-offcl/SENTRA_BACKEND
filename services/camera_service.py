@@ -34,8 +34,16 @@ def _try_picamera2():
     try:
         from picamera2 import Picamera2  # type: ignore
         cam = Picamera2()
-        cam.configure(cam.create_video_configuration(main={"size": (1280, 720)}))
+        config = cam.create_video_configuration(main={"size": (1280, 720)})
+        cam.configure(config)
         cam.start()
+        
+        # Try to enable continuous autofocus if the camera supports it
+        try:
+            cam.set_controls({"AfMode": 2}) # 2 is usually continuous autofocus
+        except Exception as e:
+            logger.info("Autofocus not supported or failed to set: %s", e)
+            
         return cam, "picamera2"
     except Exception as e:
         logger.error(f"Picamera2 failed to initialize: {e}", exc_info=True)
@@ -74,6 +82,8 @@ def mjpeg_frame_generator(quality: int = 80):
                 import cv2  # type: ignore
                 import numpy as np
                 arr = cam.capture_array()
+                # Picamera2 returns RGB by default, OpenCV expects BGR for JPEG encoding
+                arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
                 _, buf = cv2.imencode(".jpg", arr, [cv2.IMWRITE_JPEG_QUALITY, quality])
                 frame_bytes = buf.tobytes()
 
