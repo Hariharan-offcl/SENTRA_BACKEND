@@ -22,6 +22,10 @@ _sim = {
     "patrol_speed_mps": 0.45,
     "pos_x": 12.4,
     "pos_y": -4.8,
+    "ultrasonic": {"front_distance_m": 1.2, "rear_distance_m": 0.85},
+    "cliff": {"left_detected": False, "right_detected": False},
+    "current_ma": 450,
+    "mpu6050": {"pitch": 1.2, "roll": -0.5, "yaw": 45.0}
 }
 
 _start_time = time.time()
@@ -82,4 +86,8 @@ def get_ws_telemetry_payload() -> dict:
         "pos_x": _sim["pos_x"],
         "pos_y": _sim["pos_y"],
         "mode": "PATROL",
+        "ultrasonic": _sim["ultrasonic"],
+        "cliff": _sim["cliff"],
+        "current_ma": _sim["current_ma"],
+        "mpu6050": _sim["mpu6050"],
     }

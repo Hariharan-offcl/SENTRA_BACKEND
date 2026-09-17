@@ -23,7 +23,7 @@ from config import settings
 from services.udp_discovery import start_udp_discovery
 
 # Routers (REST)
-from routers import system, auth, pair, telemetry, camera, control, alerts, settings as settings_router
+from routers import system, auth, pair, telemetry, camera, control, alerts, settings as settings_router, call
 
 # WebSocket handlers
 from ws_handlers import telemetry_ws, control_ws, alerts_ws
@@ -92,6 +92,7 @@ app.include_router(camera.router)
 app.include_router(control.router)
 app.include_router(alerts.router)
 app.include_router(settings_router.router)
+app.include_router(call.router)
 
 # ── Mount WebSocket routers ───────────────────────────────────────────────────
 app.include_router(telemetry_ws.router)
