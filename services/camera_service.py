@@ -38,11 +38,15 @@ def _try_picamera2():
         cam.configure(config)
         cam.start()
         
-        # Try to enable continuous autofocus if the camera supports it
+        # Continuous autofocus sometimes fails on certain libcamera versions.
+        # Switch to manual focus (0.0 = infinity, 10.0 = macro)
         try:
-            cam.set_controls({"AfMode": 2}) # 2 is usually continuous autofocus
+            cam.set_controls({
+                "AfMode": 0,          # 0 = Manual Focus
+                "LensPosition": 3.0   # Default focus distance
+            })
         except Exception as e:
-            logger.info("Autofocus not supported or failed to set: %s", e)
+            logger.info("Failed to set manual focus: %s", e)
             
         return cam, "picamera2"
     except Exception as e:
