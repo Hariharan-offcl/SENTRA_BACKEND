@@ -131,3 +131,49 @@ def set_speed(speed_multiplier: float, target_mps: float) -> dict:
     logger.info("Speed set  multiplier=%.2f  target=%.2f m/s", speed_multiplier, target_mps)
     return {"speed_multiplier": speed_multiplier, "max_speed_mps": 1.2}
 
+# ── Autonomous Patrol Loop ───────────────────────────────────────────────────
+import threading
+import time
+
+_last_patrol_cmd = None
+
+def _patrol_loop():
+    global _last_patrol_cmd
+    while True:
+        if _state["mode"] == "PATROL" and not _state["estop_active"]:
+            try:
+                from services.telemetry_service import _sim
+                front = _sim["ultrasonic"]["front_distance_m"]
+                rear = _sim["ultrasonic"]["rear_distance_m"]
+                
+                cmd = None
+                # Front & Rear obstacles -> Stop
+                if front < 1.0 and rear < 1.0:
+                    cmd = (0.0, 0.0, "STOP")
+                # Front obstacle -> Backup
+                elif front < 1.0:
+                    cmd = (-0.5, 0.0, "BACKWARD")
+                # Rear obstacle -> Go Forward
+                elif rear < 1.0:
+                    cmd = (0.5, 0.0, "FORWARD")
+                # Clear path -> Go Forward
+                else:
+                    cmd = (0.5, 0.0, "FORWARD")
+                
+                # Apply locomotion, but avoid log spamming if doing the same thing
+                if cmd != _last_patrol_cmd:
+                    logger.info(f"Patrol logic triggered: {cmd[2]} (Front: {front}m, Rear: {rear}m)")
+                    # Temporarily disable logging inside apply_locomotion for the loop
+                    apply_locomotion(cmd[0], cmd[1], cmd[2])
+                    _last_patrol_cmd = cmd
+                    
+            except Exception as e:
+                logger.error(f"Patrol loop error: {e}")
+        else:
+            _last_patrol_cmd = None
+
+        time.sleep(0.5)  # Run patrol decisions at 2Hz
+
+# Start the background patrol thread
+threading.Thread(target=_patrol_loop, daemon=True).start()
+
