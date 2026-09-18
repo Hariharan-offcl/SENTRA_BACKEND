@@ -14,6 +14,8 @@ def ping():
     return JSONResponse({
         "status": "ok",
         "transport": "websocket",
+        "webrtc_node_clients": len(call_service.webrtc_clients["node"]),
+        "webrtc_user_clients": len(call_service.webrtc_clients["user"]),
         "node_clients": len(call_service.call_clients["node"]),
         "user_clients": len(call_service.call_clients["user"]),
         "node_active": call_service.node_frame is not None and (now - call_service.node_last_seen) < 5,

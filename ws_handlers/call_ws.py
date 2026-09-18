@@ -1,3 +1,4 @@
+import json
 import time
 import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -6,6 +7,61 @@ from services import call_service
 
 router = APIRouter(tags=["WebSocket"])
 logger = logging.getLogger(__name__)
+
+@router.websocket("/ws/webrtc/{role}")
+async def webrtc_signaling_socket(websocket: WebSocket, role: str):
+    if role not in call_service.webrtc_clients:
+        await websocket.close(code=1008, reason="role must be 'node' or 'user'")
+        return
+
+    await websocket.accept()
+    call_service.webrtc_clients[role].add(websocket)
+    peer_role = "user" if role == "node" else "node"
+    allowed_types = {"ready", "offer", "answer", "candidate", "bye"}
+
+    try:
+        while True:
+            raw_message = await websocket.receive_text()
+            try:
+                message = json.loads(raw_message)
+            except json.JSONDecodeError:
+                continue
+
+            message_type = message.get("type")
+            if message_type not in allowed_types:
+                continue
+
+            if message_type == "ready":
+                if call_service.webrtc_clients[peer_role]:
+                    await websocket.send_json({"type": "peer-ready", "role": peer_role})
+                await call_service.broadcast_signal(
+                    peer_role,
+                    {"type": "peer-ready", "role": role},
+                )
+                continue
+
+            forwarded = {"type": message_type, "from": role}
+            if message_type in {"offer", "answer"}:
+                sdp = message.get("sdp")
+                if not isinstance(sdp, str) or len(sdp) > 1_000_000:
+                    continue
+                forwarded["sdp"] = sdp
+            elif message_type == "candidate":
+                candidate = message.get("candidate")
+                if not isinstance(candidate, str) or len(candidate) > 16_384:
+                    continue
+                forwarded.update({
+                    "candidate": candidate,
+                    "sdpMid": message.get("sdpMid"),
+                    "sdpMLineIndex": message.get("sdpMLineIndex"),
+                })
+
+            await call_service.broadcast_signal(peer_role, forwarded)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        call_service.webrtc_clients[role].discard(websocket)
+        await call_service.broadcast_signal(peer_role, {"type": "peer-left", "role": role})
 
 
 @router.websocket("/ws/call/{role}")
