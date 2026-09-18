@@ -52,6 +52,10 @@ async def lifespan(app: FastAPI):
     # Start UDP broadcast discovery responder
     asyncio.create_task(start_udp_discovery(host_ip))
 
+    # Start real hardware ultrasonic polling
+    from services.ultrasonic_service import start_monitoring
+    start_monitoring()
+
     # Ensure snapshot directory exists
     os.makedirs(settings.camera_snapshot_dir, exist_ok=True)
 
