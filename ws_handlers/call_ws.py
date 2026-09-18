@@ -15,7 +15,16 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
         return
 
     await websocket.accept()
-    call_service.webrtc_clients[role].add(websocket)
+    previous_client = call_service.webrtc_clients[role]
+    call_service.webrtc_clients[role] = websocket
+    if previous_client is not None and previous_client is not websocket:
+        try:
+            await previous_client.close(
+                code=1012,
+                reason="Replaced by a newer connection for this role",
+            )
+        except Exception:
+            pass
     peer_role = "user" if role == "node" else "node"
     allowed_types = {"ready", "offer", "answer", "candidate", "bye"}
 
@@ -32,7 +41,7 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
                 continue
 
             if message_type == "ready":
-                if call_service.webrtc_clients[peer_role]:
+                if call_service.webrtc_clients[peer_role] is not None:
                     await websocket.send_json({"type": "peer-ready", "role": peer_role})
                 await call_service.broadcast_signal(
                     peer_role,
@@ -60,8 +69,9 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
     except WebSocketDisconnect:
         pass
     finally:
-        call_service.webrtc_clients[role].discard(websocket)
-        await call_service.broadcast_signal(peer_role, {"type": "peer-left", "role": role})
+        if call_service.webrtc_clients[role] is websocket:
+            call_service.webrtc_clients[role] = None
+            await call_service.broadcast_signal(peer_role, {"type": "peer-left", "role": role})
 
 
 @router.websocket("/ws/call/{role}")

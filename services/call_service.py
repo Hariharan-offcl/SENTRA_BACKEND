@@ -19,7 +19,7 @@ node_last_seen: float = 0.0
 user_last_seen: float = 0.0
 
 call_clients: dict[str, set[WebSocket]] = {"node": set(), "user": set()}
-webrtc_clients: dict[str, set[WebSocket]] = {"node": set(), "user": set()}
+webrtc_clients: dict[str, Optional[WebSocket]] = {"node": None, "user": None}
 
 MJPEG_BOUNDARY = b"frame"
 MAX_FRAME_BYTES = 5 * 1024 * 1024
@@ -47,15 +47,15 @@ async def broadcast_frame(role: str, frame: bytes) -> None:
 
 
 async def broadcast_signal(role: str, message: dict) -> None:
-    """Forward WebRTC signaling JSON; media never passes through this server."""
-    disconnected: list[WebSocket] = []
-    for client in tuple(webrtc_clients[role]):
-        try:
-            await client.send_json(message)
-        except Exception:
-            disconnected.append(client)
-    for client in disconnected:
-        webrtc_clients[role].discard(client)
+    """Forward signaling to the single active peer for a role."""
+    client = webrtc_clients[role]
+    if client is None:
+        return
+    try:
+        await client.send_json(message)
+    except Exception:
+        if webrtc_clients[role] is client:
+            webrtc_clients[role] = None
 
 
 def process_frame(data: bytes, max_width: int = 640) -> bytes:
