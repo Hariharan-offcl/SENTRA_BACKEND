@@ -26,7 +26,7 @@ from services.udp_discovery import start_udp_discovery
 from routers import system, auth, pair, telemetry, camera, control, alerts, settings as settings_router, call
 
 # WebSocket handlers
-from ws_handlers import telemetry_ws, control_ws, alerts_ws
+from ws_handlers import telemetry_ws, control_ws, alerts_ws, call_ws
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -98,6 +98,7 @@ app.include_router(call.router)
 app.include_router(telemetry_ws.router)
 app.include_router(control_ws.router)
 app.include_router(alerts_ws.router)
+app.include_router(call_ws.router)
 
 # ── Static file serving (snapshots download) ──────────────────────────────────
 _snapshot_dir = settings.camera_snapshot_dir

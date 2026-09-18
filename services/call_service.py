@@ -1,79 +1,124 @@
-import time
+import asyncio
 import io
+import time
 import logging
-
-try:
-    from PIL import Image, ImageDraw
-except ImportError:
-    Image = None
+from typing import Optional, Set
+from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
 
-# Buffers
-node_frame_buffer: bytes = b""
-node_last_seen: float = 0.0
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    Image = None
 
-user_frame_buffer: bytes = b""
+# Buffers
+node_frame: Optional[bytes] = None
+user_frame: Optional[bytes] = None
+node_last_seen: float = 0.0
 user_last_seen: float = 0.0
 
+call_clients: dict[str, set[WebSocket]] = {"node": set(), "user": set()}
 
-def generate_placeholder_frame(title: str, subtitle: str) -> bytes:
+MJPEG_BOUNDARY = b"frame"
+MAX_FRAME_BYTES = 5 * 1024 * 1024
+
+
+def is_valid_jpeg(data: bytes) -> bool:
+    if data is None:
+        return False
+    return (
+        4 <= len(data) <= MAX_FRAME_BYTES
+        and data[:2] == b"\xff\xd8"
+        and data[-2:] == b"\xff\xd9"
+    )
+
+
+async def broadcast_frame(role: str, frame: bytes) -> None:
+    disconnected: list[WebSocket] = []
+    for client in tuple(call_clients[role]):
+        try:
+            await client.send_bytes(frame)
+        except Exception:
+            disconnected.append(client)
+    for client in disconnected:
+        call_clients[role].discard(client)
+
+
+def process_frame(data: bytes, max_width: int = 640) -> bytes:
     if Image is None:
-        return b""
+        return data
     try:
-        img = Image.new("RGB", (640, 480), color=(15, 23, 42))
-        draw = ImageDraw.Draw(img)
-        draw.text((180, 210), title, fill=(0, 255, 170))
-        draw.text((160, 240), subtitle, fill=(180, 190, 200))
+        img = Image.open(io.BytesIO(data))
+        exif = img.getexif()
+        if exif:
+            orientation = exif.get(274, 1)
+            rotations = {3: 180, 6: 270, 8: 90}
+            if orientation in rotations:
+                img = img.rotate(rotations[orientation], expand=True)
+        img = img.convert("RGB")
+        if img.width > max_width:
+            ratio = max_width / img.width
+            img = img.resize((max_width, int(img.height * ratio)), Image.LANCZOS)
         buf = io.BytesIO()
-        img.save(buf, format="JPEG")
+        img.save(buf, format="JPEG", quality=55, optimize=False)
         return buf.getvalue()
     except Exception as e:
-        logger.error(f"Failed to generate placeholder: {e}")
+        logger.error(f"Error processing frame: {e}")
+        return data
+
+
+def generate_placeholder_frame(text: str) -> bytes:
+    if Image is None:
         return b""
+    img = Image.new("RGB", (640, 480), color=(15, 20, 35))
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+    except Exception:
+        font = ImageFont.load_default()
+    
+    # Simple text centering
+    bbox = draw.textbbox((0, 0), text, font=font)
+    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    draw.text(((640 - w) / 2, (480 - h) / 2), text, fill=(100, 120, 160), font=font)
+    
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=70)
+    return buf.getvalue()
 
 
 # Initialize with placeholders
-node_frame_buffer = generate_placeholder_frame(
-    "SENTRA PI 5 MEDIA GATEWAY", "Awaiting Phone A (Node) Video Feed..."
-)
-user_frame_buffer = generate_placeholder_frame(
-    "SENTRA 2-WAY CALL GATEWAY", "Awaiting Phone B (User) Video Feed..."
-)
+node_frame = generate_placeholder_frame("Awaiting Node (Phone A) feed...")
+user_frame = generate_placeholder_frame("Awaiting User (Phone B) feed...")
 
 
-def update_node_frame(frame_bytes: bytes):
-    global node_frame_buffer, node_last_seen
-    node_frame_buffer = frame_bytes
+async def update_node_frame(raw_bytes: bytes):
+    global node_frame, node_last_seen
+    node_frame = process_frame(raw_bytes)
     node_last_seen = time.time()
+    await broadcast_frame("user", node_frame) # Broadcast to peer
 
 
-def update_user_frame(frame_bytes: bytes):
-    global user_frame_buffer, user_last_seen
-    user_frame_buffer = frame_bytes
+async def update_user_frame(raw_bytes: bytes):
+    global user_frame, user_last_seen
+    user_frame = process_frame(raw_bytes)
     user_last_seen = time.time()
+    await broadcast_frame("node", user_frame) # Broadcast to peer
 
 
-def stream_generator(target: str):
-    """
-    Yields frames continuously for MJPEG streaming.
-    target: 'node' or 'user'
-    """
-    global node_frame_buffer, user_frame_buffer
-    
+def mjpeg_generator(get_frame_fn):
     while True:
-        if target == 'node':
-            frame = node_frame_buffer
-        else:
-            frame = user_frame_buffer
-            
+        frame = get_frame_fn()
         if not frame:
             time.sleep(0.1)
             continue
             
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+        header = (
+            b"--" + MJPEG_BOUNDARY + b"\r\n"
+            b"Content-Type: image/jpeg\r\n"
+            b"Content-Length: " + str(len(frame)).encode() + b"\r\n"
+            b"\r\n"
         )
-        # Yield at ~30 FPS max
-        time.sleep(0.03)
+        yield header + frame + b"\r\n"
+        time.sleep(1 / 30)
