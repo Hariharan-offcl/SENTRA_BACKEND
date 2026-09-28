@@ -20,7 +20,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from config import settings
-from services.udp_discovery import start_udp_discovery
+from services.connection_manager import connection_manager
+
 
 # Routers (REST)
 from routers import system, auth, pair, telemetry, camera, control, alerts, settings as settings_router, call
@@ -79,35 +80,43 @@ async def lifespan(app: FastAPI):
     # Start UDP broadcast discovery responder
     asyncio.create_task(start_udp_discovery(host_ip))
 
-    # Start real hardware ultrasonic polling
-    from services.ultrasonic_service import start_monitoring
-    start_monitoring()
+    # ── Phase 2: Centralized Hardware Lifecycle ──────────────────────
+    from hardware.manager import hardware_manager
+    hardware_manager.initialize()
 
     # ── Phase 1: wire the centralized safety layer ──────────────────────
     from core.safety import get_safety_layer
     from services import motor_service
 
     # ── Phase 4: unified sensor aggregator feeds the safety gate ────
-    from services import imu_service, encoder_service, sensor_service
-    imu_service.start_monitoring()
-    encoder_service.start_monitoring()
+    from services import sensor_service
     sensor_service.start()
+
+    from services import imu_service
+    imu_service.start_monitoring()
 
     safety = get_safety_layer()
     safety.wire(motor_apply=motor_service._apply_wheel_duty,
                 sensor_provider=sensor_service.sensor_provider)
     safety.start_watchdog()
 
-    # ── Phase 3: safety events → alerts WS bridge + cliff sensors ────
+    # ── Phase 3: safety events → alerts WS bridge ──────────────────────
     from services import safety_events
-    from services import cliff_service
     safety.wire_event_reporter(safety_events.report)
+
+    # ── Phase 2: Cliff monitoring ──────────────────────
+    from services import cliff_service
+    cliff_service.start_monitoring()
 
     # ── Phase 14: notifications (mirror safety events → persistent feed) ──
     from services import notification_service
     notification_service.load()   # ~/sentra_data/notifications.json
     notification_service.attach_loop(asyncio.get_running_loop())
     safety_events.add_listener(notification_service.notify_safety_event)
+
+    # ── Phase 4: Start mapping recording loop ──────────────────────────
+    from services.mapping_service import mapping_service
+    asyncio.create_task(mapping_service.recording_loop())
 
     # ── Phase 15: device registry + JWT auth enforcement ────────────────
     from services import device_registry
@@ -189,13 +198,13 @@ async def lifespan(app: FastAPI):
     from core import sd_notify as _sd  # Phase 20
     _sd.notify("STOPPING=1")
     _sd.heartbeat.stop()
-    from services import cliff_service, imu_service, encoder_service, sensor_service
+
+    # HAL Shutdown
+    from hardware.manager import hardware_manager
+    hardware_manager.shutdown()
+
+    from services import sensor_service
     from services import vision_service
-    cliff_service.stop_monitoring()
-    imu_service.stop_monitoring()
-    encoder_service.stop_monitoring()
-    sensor_service.stop()
-    vision_service.stop()
     mapping_service.stop_session()
     patrol_service.stop_patrol()
     patrol_service.stop_engine()

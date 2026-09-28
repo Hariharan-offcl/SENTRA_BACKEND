@@ -87,6 +87,47 @@ def _cleanup_hardware():
 _init_hardware()
 atexit.register(_cleanup_hardware)
 
+# ── Stall Detection Guard (Phase 6) ──────────────────────────────────────────────
+
+_stall_start_time: Optional[float] = None
+
+def _check_for_stall():
+    """
+    Monitors the current draw via HAL. If current exceeds threshold
+    for a sustained period, triggers an ESTOP.
+    """
+    global _stall_start_time
+    from hardware.manager import hardware_manager
+
+    # Only monitor if motors are actually commanded to move
+    st = get_robot_state()
+    if not st.is_moving():
+        _stall_start_time = None
+        return
+
+    try:
+        curr_data = hardware_manager.current_sensor.read()
+        current_ma = abs(curr_data.get("current", 0.0))
+
+        threshold = core_config.STALL_CURRENT_THRESHOLD_MA
+        dwell = core_config.STALL_DWELL_TIME_S
+
+        if current_ma > threshold:
+            if _stall_start_time is None:
+                _stall_start_time = time.time()
+            elif (time.time() - _stall_start_time) > dwell:
+                logger.warning("MOTOR STALL DETECTED: %.2f mA > %.2f mA", current_ma, threshold)
+                trigger_estop() # This resets _stall_start_time effectively by stopping movement
+        else:
+            _stall_start_time = None
+
+    except Exception as e:
+        logger.error("Stall guard check error: %s", e)
+
+# Initialize on startup, clean up on shutdown
+_init_hardware()
+atexit.register(_cleanup_hardware)
+
 
 def get_state() -> dict:
     """Compatibility view over the central state + local speed settings."""
@@ -146,10 +187,12 @@ def apply_active_brake() -> None:
                 lgpio.tx_pwm(_h, en, 1000, 0)
 
 
+from hardware.manager import hardware_manager
+
 def _apply_wheel_duty(left_pct: float, right_pct: float) -> None:
     """Raw differential application — the single function the safety layer drives."""
-    _set_motor(ENA, IN1, IN2, left_pct)
-    _set_motor(ENB, IN3, IN4, right_pct)
+    # BRIDGE: Redirect to HAL
+    hardware_manager.motor.set_speed(left_pct / 100.0, right_pct / 100.0)
 
 
 # ── Canonical safety-gated entry point ───────────────────────────────────────
@@ -213,9 +256,8 @@ def apply_locomotion(linear_velocity: float, angular_velocity: float, direction:
 
 def trigger_estop() -> dict:
     result = get_robot_state().trigger_estop(reason="rest_or_ws")
-    # Immediate hardware cut regardless of gate state
-    _set_motor(ENA, IN1, IN2, 0)
-    _set_motor(ENB, IN3, IN4, 0)
+    # Immediate hardware cut via HAL
+    hardware_manager.motor.set_speed(0, 0)
     return {
         "estop_active": result["estop_active"],
         "motors_disabled": result.get("motors_disabled", True),

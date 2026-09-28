@@ -10,53 +10,29 @@ import logging
 from typing import Set
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from services.connection_manager import connection_manager
+import asyncio
+import json
+import logging
 
 router = APIRouter(tags=["WebSocket"])
 logger = logging.getLogger(__name__)
 
-# Active subscriber connections
-_subscribers: Set[WebSocket] = set()
-
-
 async def broadcast_alert(alert: dict) -> None:
     """
     Broadcast a new alert to all connected WebSocket clients.
-    Call this from any sensor/AI integration that detects an intrusion.
-
-    Example:
-        from ws_handlers.alerts_ws import broadcast_alert
-        await broadcast_alert({
-            "id": "ALT-999",
-            "title": "Motion Detected",
-            "severity": "DANGER",
-            ...
-        })
     """
-    dead: Set[WebSocket] = set()
     message = json.dumps(alert)
-
-    for ws in tuple(_subscribers):
-        try:
-            await ws.send_text(message)
-        except Exception:
-            dead.add(ws)
-
-    # NOTE: mutate in place — `_subscribers -= dead` would rebind the name and
-    # raise UnboundLocalError (latent bug that surfaced in Phase 3 testing).
-    if dead:
-        _subscribers.difference_update(dead)
-
+    # Phase 1: Use connection_manager to broadcast to all users
+    await connection_manager.broadcast({"event": "alert", "data": alert})
 
 @router.websocket("/ws/alerts")
 async def alerts_ws(websocket: WebSocket):
     """
     Persistent push channel — the app listens here for live safety alerts.
-    Server sends a heartbeat every 30 s to keep the connection alive through
-    NAT / mobile network timeouts.
     """
-    await websocket.accept()
-    _subscribers.add(websocket)
-    logger.info("Alerts WS connected  total=%d", len(_subscribers))
+    await connection_manager.connect(websocket, role="USER")
+    logger.info("Alerts WS connected")
 
     try:
         while True:
@@ -68,4 +44,4 @@ async def alerts_ws(websocket: WebSocket):
     except Exception as exc:
         logger.error("Alerts WS error: %s", exc)
     finally:
-        _subscribers.discard(websocket)
+        connection_manager.disconnect(websocket)

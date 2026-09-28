@@ -32,6 +32,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from services.motion_controller import get_motion_controller
 from services import motor_service
 from core import auth as core_auth  # Phase 15: token gate on this socket
+from services.connection_manager import connection_manager
 
 router = APIRouter(tags=["WebSocket"])
 logger = logging.getLogger(__name__)
@@ -61,7 +62,10 @@ async def control_ws(websocket: WebSocket):
     ctx = await core_auth.enforce_ws_control(websocket)
     if ctx is None:
         return  # denied — enforce_ws_control already closed the socket
-    await websocket.accept()
+
+    # Phase 1: Use connection_manager for registration
+    await connection_manager.connect(websocket, role="USER", user_id=ctx.device_id)
+
     mc = get_motion_controller()
     logger.info("Control WS connected")
     pusher = asyncio.create_task(_state_pusher(websocket, mc))
@@ -87,3 +91,4 @@ async def control_ws(websocket: WebSocket):
         motor_service.stop_all("control_ws_error")
     finally:
         pusher.cancel()
+        connection_manager.disconnect(websocket)

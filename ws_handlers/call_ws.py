@@ -1,21 +1,18 @@
-import json
-import time
-import logging
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-
-from services import call_service
-from services import emergency_call  # Phase 13: session presence tracking
+from services.connection_manager import connection_manager
 
 router = APIRouter(tags=["WebSocket"])
 logger = logging.getLogger(__name__)
 
 @router.websocket("/ws/webrtc/{role}")
 async def webrtc_signaling_socket(websocket: WebSocket, role: str):
+    # Mapping internal role terminology to ConnectionManager roles
+    cm_role = "ROVER" if role == "node" else "USER"
     if role not in call_service.webrtc_clients:
         await websocket.close(code=1008, reason="role must be 'node' or 'user'")
         return
 
-    await websocket.accept()
+    await connection_manager.connect(websocket, role=cm_role, user_id=role)
+
     previous_client = call_service.webrtc_clients[role]
     call_service.webrtc_clients[role] = websocket
     emergency_call.note_presence(role, True)  # user connect answers the emergency call
@@ -71,6 +68,7 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
     except WebSocketDisconnect:
         pass
     finally:
+        connection_manager.disconnect(websocket)
         emergency_call.note_presence(role, False)  # peers gone → ENDED if ACTIVE
         if call_service.webrtc_clients[role] is websocket:
             call_service.webrtc_clients[role] = None
@@ -79,18 +77,19 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
 
 @router.websocket("/ws/call/{role}")
 async def call_socket(websocket: WebSocket, role: str):
+    cm_role = "ROVER" if role == "node" else "USER"
     if role not in call_service.call_clients:
         await websocket.close(code=1008, reason="role must be 'node' or 'user'")
         return
 
-    await websocket.accept()
+    await connection_manager.connect(websocket, role=cm_role, user_id=role)
     call_service.call_clients[role].add(websocket)
     peer_role = "user" if role == "node" else "node"
 
     # Give a newly connected phone the freshest peer frame immediately.
     latest_peer_frame = call_service.user_frame if role == "node" else call_service.node_frame
     latest_peer_seen = call_service.user_last_seen if role == "node" else call_service.node_last_seen
-    
+
     if (
         latest_peer_frame
         and time.time() - latest_peer_seen < 5
@@ -116,8 +115,9 @@ async def call_socket(websocket: WebSocket, role: str):
                 call_service.user_last_seen = time.time()
 
             await call_service.broadcast_frame(peer_role, frame)
-            
+
     except WebSocketDisconnect:
         pass
     finally:
+        connection_manager.disconnect(websocket)
         call_service.call_clients[role].discard(websocket)

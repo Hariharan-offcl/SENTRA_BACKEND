@@ -271,16 +271,26 @@ def _speed_multiplier() -> float:
 
 
 def _step_toward(current: float, target: float, dt: float) -> float:
-    """Move current toward target at accel/decel rate limits (runtime-tunable)."""
+    """Move current toward target at accel/decel rate limits (runtime-tunable).
+    Handles zero-crossings and precise convergence.
+    """
     if math.isclose(current, target, abs_tol=0.01):
         return target
+
     cfg = get_safety_config()
-    delta_mag = abs(target) < abs(current) or (current * target < 0)
-    rate = cfg.get("decel_pct_per_s") if delta_mag else cfg.get("accel_pct_per_s")
+
+    # Determine if we are accelerating (increasing magnitude)
+    # or decelerating (decreasing magnitude or changing direction).
+    # If target is 0 or signs differ, it's a deceleration/direction-change event.
+    is_decelerating = (abs(target) < abs(current)) or (current * target < 0)
+
+    rate = cfg.get("decel_pct_per_s") if is_decelerating else cfg.get("accel_pct_per_s")
     max_step = rate * dt
+
     diff = target - current
     if abs(diff) <= max_step:
         return target
+
     return current + math.copysign(max_step, diff)
 
 

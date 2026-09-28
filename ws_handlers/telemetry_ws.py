@@ -11,13 +11,10 @@ from typing import Set
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from services import telemetry_service
+from services.connection_manager import connection_manager
 
 router = APIRouter(tags=["WebSocket"])
 logger = logging.getLogger(__name__)
-
-# Connection pool — multiple dashboards can subscribe simultaneously
-_clients: Set[WebSocket] = set()
-
 
 @router.websocket("/ws/telemetry")
 async def telemetry_ws(websocket: WebSocket):
@@ -25,9 +22,10 @@ async def telemetry_ws(websocket: WebSocket):
     10 Hz real-time telemetry stream.
     The Flutter Dashboard connects here immediately after pairing.
     """
-    await websocket.accept()
-    _clients.add(websocket)
-    logger.info("Telemetry WS connected  total=%d", len(_clients))
+    # Phase 1: Use connection_manager for registration
+    # Defaulting to USER role for telemetry subscribers
+    await connection_manager.connect(websocket, role="USER")
+    logger.info("Telemetry WS connected")
 
     try:
         while True:
@@ -39,4 +37,4 @@ async def telemetry_ws(websocket: WebSocket):
     except Exception as exc:
         logger.error("Telemetry WS error: %s", exc)
     finally:
-        _clients.discard(websocket)
+        connection_manager.disconnect(websocket)

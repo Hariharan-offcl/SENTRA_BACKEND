@@ -44,6 +44,10 @@ MOTION_TICK_S: float = 0.05            # 20 Hz ramp loop
 BRAKE_HOLD_S: float = float(os.getenv("SENTRA_BRAKE_HOLD_S", "0.5"))  # active brake then release
 MAX_MOVE_DURATION_S: float = 30.0      # cap for REST one-shot moves
 
+# ── Stall Detection (Phase 6) ───────────────────────────────────────────
+STALL_CURRENT_THRESHOLD_MA: float = float(os.getenv("SENTRA_STALL_MA", "2000"))
+STALL_DWELL_TIME_S: float = float(os.getenv("SENTRA_STALL_DWELL_S", "0.2"))
+
 # ── Patrol loop (Phase 7 will replace with routes; kept for compatibility) ──
 PATROL_OBSTACLE_M: float = float(os.getenv("SENTRA_PATROL_OBSTACLE_M", "1.0"))
 PATROL_TICK_S: float = 0.5

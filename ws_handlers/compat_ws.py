@@ -3,7 +3,7 @@ SENTRA — Final app multiplexed WebSocket (Phase 21).
 
 The single socket the final Flutter spec uses:
 
-    ws://<pi-ip>:8000/ws?token=<jwt>
+    ws://<pi-ip>:8080/ws?token=<jwt>
 
 Envelope both directions (exact app-spec format):
     {"event": "...", "data": {...}}
@@ -32,7 +32,7 @@ import asyncio
 import json
 import logging
 import time
-from typing import Optional, Set
+from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -40,12 +40,10 @@ from core import auth as core_auth
 from core import config as core_config
 from services import compat_map as cm
 from services import motor_service
+from services.connection_manager import connection_manager
 
 router = APIRouter(tags=["WebSocket"])
 logger = logging.getLogger(__name__)
-
-_clients: Set[WebSocket] = set()
-_alert_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 async def send_event(ws: WebSocket, event: str, data: dict) -> None:
@@ -54,11 +52,12 @@ async def send_event(ws: WebSocket, event: str, data: dict) -> None:
 
 def push_event(event: str, data: dict) -> None:
     """Thread-safe push of one event to every connected app client."""
-    loop = _alert_loop
-    if loop is None or not _clients:
-        return
     import asyncio as _aio
-    for ws in list(_clients):
+    loop = _aio.get_event_loop()
+
+    # Only push to USER roles for the app compat socket
+    users = connection_manager.get_connections_by_role("USER")
+    for ws in list(users):
         try:
             _aio.run_coroutine_threadsafe(
                 send_event(ws, event, data), loop)
@@ -191,7 +190,6 @@ async def _recv_loop(ws: WebSocket) -> None:
 
 @router.websocket("/ws")
 async def compat_ws_endpoint(websocket: WebSocket):
-    global _alert_loop
     token = websocket.query_params.get("token", "").strip()
     ctx = None
     if core_auth.AUTH_ENFORCED:
@@ -212,11 +210,9 @@ async def compat_ws_endpoint(websocket: WebSocket):
         ctx = core_auth.AuthContext(device_id="anon", role="GUEST",
                                     permissions=[], kind="user", jti="-")
 
-    await websocket.accept()
-    _clients.add(websocket)
-    _alert_loop = asyncio.get_running_loop()
+    await connection_manager.connect(websocket, role="USER", user_id=ctx.device_id)
     logger.info("App compat WS connected (%s) total=%d",
-                ctx.device_id, len(_clients))
+                ctx.device_id, len(connection_manager.active_connections))
 
     pusher = asyncio.create_task(_push_loop(websocket))
     try:
@@ -227,10 +223,10 @@ async def compat_ws_endpoint(websocket: WebSocket):
         logger.error("compat WS error: %s", exc)
     finally:
         pusher.cancel()
-        _clients.discard(websocket)
+        connection_manager.disconnect(websocket)
         # Safety: this client may have been driving.
         from services.motion_controller import get_motion_controller
         mc = get_motion_controller()
         mc.stop("app_compat_ws")
         motor_service.stop_all("app_compat_ws_disconnect")
-        logger.info("App compat WS disconnected total=%d", len(_clients))
+        logger.info("App compat WS disconnected total=%d", len(connection_manager.active_connections))
