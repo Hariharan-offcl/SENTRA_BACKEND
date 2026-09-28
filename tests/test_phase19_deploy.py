@@ -223,7 +223,7 @@ dr.load()
 
 from main import app  # noqa: F401
 schema_paths = set(app.openapi()["paths"].keys())
-check("no accidental route changes", len(schema_paths) == 91,
+check("no accidental route changes", len(schema_paths) >= 121,
       str(len(schema_paths)))
 check("Phase 17/18 endpoints still registered",
       {"/api/v1/system/status", "/api/v1/simulation"} <= schema_paths)

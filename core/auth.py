@@ -54,6 +54,8 @@ OPEN_PATHS = {
     "/api/v1/pair",
     "/docs", "/redoc", "/openapi.json",
     "/api/v1/docs", "/api/v1/openapi.json",
+    # Phase 21 compat aliases (final app spec): login + rover pairing + logout
+    "/api/auth/login", "/api/auth/rover/pair", "/api/auth/logout",
 }
 
 ROLE_PERMISSIONS = {

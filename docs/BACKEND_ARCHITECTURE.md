@@ -1501,3 +1501,99 @@ paths, 9 WS channels, docs through §36.** The §14 audit table above is fully
 green. Remaining work is hardware-attach validation on the Pi 5 (real GPIO,
 I2C, battery ADC) and production secret rotation — operational tasks beyond
 the backend plan.
+
+## 37. Phase 21 — Final App Compatibility Layer (2026-09-28)
+
+When the **final Flutter app spec** arrived (login/rover-pair auth, robot
+objects, one multiplexed `/ws` with `{event, data}` envelope, flat alert
+arrays, multipart people registry, call lifecycle), the backend already spoke
+a different (older, richer) contract — APIS.md `/api/v1/*`. Rather than
+rewrite 20 phases of verified internals, Phase 21 adds an **adapter layer**:
+both contracts live side by side against the same services.
+
+### Surface
+
+```
+REST (prefix /api)                          internal implementation
+  POST /auth/login            (OPEN)        core.auth.issue_session(OWNER)
+  POST /auth/rover/pair       (OPEN)        node device + GUARD token
+  GET  /auth/me                             token → user object
+  POST /auth/logout           (OPEN)        jti revocation
+  GET  /robots | /robots/{id}               compat_map.robot_object()
+  POST /robots/{id}/mode                    app modes → state machine
+  POST /robots/{id}/control/{move,stop,brake,estop}
+  CRUD /robots/{id}/locations[/...]         tag_map (+ rename_tag)
+  POST /robots/{id}/navigate/go-to          navigation_service / dock
+  CRUD /robots/{id}/patrol/routes[...]      patrol_service (name↔id mapping)
+  POST /robots/{id}/patrol/{start,pause,stop}   pause ≡ stop (documented)
+  POST /robots/{id}/dock[/cancel]           docking_service
+  GET  /robots/{id}/camera/status           vision stats
+  GET  /alerts (flat) · POST /alerts/{id}/dismiss   notification_service
+  GET|POST|PUT|DELETE /people[/...]         person_registry (+ notes/update)
+  POST /calls/initiate | /{id}/{accept,reject,end}  + WS call_incoming/ended
+
+WS /ws?token=<jwt>   {"event", "data"} both ways
+  push: telemetry 1 Hz · sensor_update 2 Hz · apriltag_detected /
+        person_detected on set-change · navigation_status 1 Hz during
+        autonomy · alert/emergency instant (safety listener) ·
+        call_incoming / call_ended
+  recv: control_move / control_stop / control_estop → motion controller
+        voice_command → voice_service · camera_status relay · ping → pong
+```
+
+### Design decisions
+
+- **Bare payloads, not `{"data": …}`**: the spec's own examples (login,
+  robots, alerts, people) show plain objects/arrays — matched the examples.
+- **Auth bridge**: `admin`→OWNER, `user`→GUARD, rover→node/GUARD; token in
+  `?token=` on `/ws` (4401 when invalid under enforcement).
+- **Pause ≡ stop**: the patrol engine has no mid-waypoint freeze (safety
+  design); the alias stops cleanly and says so.
+- **Fixed bug found here** (Phase 15 latent): `device_registry.upsert_device`
+  defaulted `kind="user"`, so `issue_session`'s internal bare call clobbered
+  `kind="node"` on every rover token re-issue. Default is now `None` = no
+  change.
+- Alert `type` mapping: FALL→fall, PERSON_*→unknown_person,
+  OBSTACLE/CLIFF→obstacle, ESTOP→estop, others→keyword heuristic →
+  connection.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `services/compat_map.py` | NEW — mappers: robot/user/location/route/person/alert/telemetry/sensor/apriltag/person/nav events. |
+| `routers/compat.py` | NEW — all `/api/*` alias endpoints incl. multipart people + call registry. |
+| `ws_handlers/compat_ws.py` | NEW — multiplexed `/ws`, push loops, event dispatch, safety→alert/emergency. |
+| `services/person_registry.py` | `notes` on records; `update_person()` (name/notes/snapshot). |
+| `services/tag_map.py` | `rename_tag()` (partial update). |
+| `services/device_registry.py` | `upsert_device(kind=None)` no-change default (bug fix). |
+| `core/auth.py` | OPEN_PATHS += `/api/auth/{login,rover/pair,logout}`. |
+| `tools/probe_compat_app.py` | NEW — live probe of the whole app story. |
+| `tests/test_phase21_compat.py` | NEW — 62 tests. |
+
+### Verification performed (Phase 21)
+
+- 62/62 tests: auth (login/user/rover-pair/me/401s/revoking logout), robots +
+  mode transitions + 401/400/404s, control REST incl. real motion-controller
+  targets, locations CRUD, go-to, patrol routes/start/pause/stop/delete, dock,
+  alerts flat array + dismiss + status flip, people multipart lifecycle,
+  calls lifecycle incl. WS push, **live uvicorn WS probe** (pong, telemetry
+  envelope, control_move driving the ramp loop), safety→alert+emergency push,
+  121 openapi paths.
+- Full regression: **745 passed, 0 failed** across 21 suites.
+- Live on :8099 (`tools/probe_compat_app.py`): login 200 → rover pair 200
+  (role rover) → robots/me 200 → mode manual → estop latched → 7 alerts with
+  app fields → calls ringing→ended → WS pong + telemetry (`is_emergency:
+  true` honestly reflecting the latched estop) + sensor_update.
+
+### Known limitations (Phase 21)
+
+1. `image_url`/`confidence` on app alerts are null (internal notifications
+   carry neither) — app renders the fallback path.
+2. `person_detected` events report `is_known: false` — body tracks are
+   un-identified by design (recognition is face-embedding-based, one-shot).
+3. Call accept/reject/end is backend bookkeeping; media setup still follows
+   the Phase 1 webrtc signaling sockets (the rover phone uses these aliases
+   for lifecycle UX only).
+4. Login accepts any username/password (appliance model, Phase 15 device
+   registry still tracks/revokes every issued token).

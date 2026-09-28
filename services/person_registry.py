@@ -98,7 +98,7 @@ def find_by_name(name: str) -> Optional[dict]:
 
 
 def add_person(name: str, embeddings: list[list[float]],
-               snapshot_path: Optional[str] = None) -> dict:
+               snapshot_path: Optional[str] = None, notes: str = "") -> dict:
     """Register a person. Rejects duplicate names (use update for that)."""
     with _lock:
         if not name or not name.strip():
@@ -112,6 +112,7 @@ def add_person(name: str, embeddings: list[list[float]],
         record = {
             "person_key": key,
             "name": name.strip(),
+            "notes": (notes or "").strip(),
             "embeddings": [list(e) for e in embeddings],
             "snapshot_path": snapshot_path,
             "created_at": time.time(),
@@ -124,6 +125,43 @@ def add_person(name: str, embeddings: list[list[float]],
                     name, key, len(record["embeddings"]))
         d = dict(record)
         d["embedding_count"] = len(record["embeddings"])
+        d.pop("embeddings", None)
+        return d
+
+
+def update_person(person_key: str, name: Optional[str] = None,
+                  notes: Optional[str] = None,
+                  snapshot_path: Optional[str] = None) -> dict:
+    """Update name/notes/snapshot (Phase 21: app PUT /people/{id}).
+    Fields left as None keep their current value; a new snapshot_path replaces
+    the stored one (old file removed)."""
+    with _lock:
+        p = _persons.get(person_key)
+        if p is None:
+            raise KeyError("unknown person_key")
+        if name is not None:
+            if not name.strip():
+                raise ValueError("name must not be empty")
+            new_key = name.strip().lower()
+            if new_key in _key_by_name and _key_by_name[new_key] != person_key:
+                raise ValueError(f"person already registered: {name}")
+            p["name"] = name.strip()
+        if notes is not None:
+            p["notes"] = notes.strip()
+        old_snap = p.get("snapshot_path")
+        if snapshot_path and snapshot_path != old_snap:
+            p["snapshot_path"] = snapshot_path
+            if old_snap and os.path.exists(old_snap):
+                try:
+                    os.remove(old_snap)
+                except OSError:
+                    pass
+        p["updated_at"] = time.time()
+        _reindex_locked()
+        _write_locked()
+        logger.info("Person updated: %s (%s)", p["name"], person_key)
+        d = dict(p)
+        d["embedding_count"] = len(p["embeddings"])
         d.pop("embeddings", None)
         return d
 

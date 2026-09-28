@@ -270,7 +270,8 @@ check("/api/v1/simulation/status registered",
 check("earlier phases intact",
       {"/api/v1/system/status", "/api/v1/relay/status", "/api/v1/devices"}
       <= schema_paths)
-check("path count now 91", len(schema_paths) == 91, str(len(schema_paths)))
+check("path count >= 121 (Phase 21 owns exact count)",
+      len(schema_paths) >= 121, str(len(schema_paths)))
 
 # ── summary ──────────────────────────────────────────────────────────────────
 print(f"\n{'=' * 60}")

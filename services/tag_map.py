@@ -123,6 +123,26 @@ def upsert_tag(tag_id: int, name: str, type: str = "LOCATION",
         return dict(entry)
 
 
+def rename_tag(tag_id: int, name: Optional[str] = None,
+               notes: Optional[str] = None) -> dict:
+    """Rename / re-note a tag binding (Phase 21: app PUT /locations/{id}).
+    Only the fields supplied change. Raises KeyError for unknown tag_id."""
+    with _lock:
+        tag_id = int(tag_id)
+        t = _tags.get(tag_id)
+        if t is None:
+            raise KeyError(f"unknown tag_id {tag_id}")
+        if name is not None:
+            if not name.strip():
+                raise ValueError("name must not be empty")
+            t["name"] = name.strip()
+        if notes is not None:
+            t["notes"] = notes.strip()
+        t["updated_at"] = _now()
+        _write_locked()
+        return dict(t)
+
+
 def delete_tag(tag_id: int) -> bool:
     with _lock:
         if int(tag_id) in _tags:

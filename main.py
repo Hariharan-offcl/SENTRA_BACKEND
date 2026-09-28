@@ -39,9 +39,11 @@ from routers import notifications as notifications_router
 from routers import devices as devices_router
 from routers import relay as relay_router
 from routers import simulation as simulation_router  # Phase 18
+from routers import compat as compat_router  # Phase 21: final app spec aliases
 
 # WebSocket handlers
 from ws_handlers import telemetry_ws, control_ws, alerts_ws, call_ws
+from ws_handlers import compat_ws  # Phase 21: multiplexed app socket
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -116,6 +118,9 @@ async def lifespan(app: FastAPI):
     relay_client.configure_from_env()
     relay_client.attach_loop(asyncio.get_running_loop())
     safety_events.add_listener(relay_client._on_safety_event)  # DANGER push
+    # ── Phase 21: final app spec socket — alert/emergency instant push ──
+    from ws_handlers import compat_ws
+    safety_events.add_listener(compat_ws._on_safety_event)
     relay_client.start()
     safety_events.attach_loop(asyncio.get_running_loop())
     cliff_service.start_monitoring()
@@ -273,12 +278,14 @@ app.include_router(notifications_router.router)  # Phase 14: /api/v1/notificatio
 app.include_router(devices_router.router)  # Phase 15: /api/v1/devices/*
 app.include_router(relay_router.router)  # Phase 16: /api/v1/relay/*            # Phase 12: /api/v1/fall/*
 app.include_router(simulation_router.router)  # Phase 18: /api/v1/simulation/*
+app.include_router(compat_router.router)  # Phase 21: /api/* final app spec
 
 # ── Mount WebSocket routers ───────────────────────────────────────────────────
 app.include_router(telemetry_ws.router)
 app.include_router(control_ws.router)
 app.include_router(alerts_ws.router)
 app.include_router(call_ws.router)
+app.include_router(compat_ws.router)  # Phase 21: /ws multiplexed app socket
 
 # ── Static file serving (snapshots download) ──────────────────────────────────
 _snapshot_dir = settings.camera_snapshot_dir

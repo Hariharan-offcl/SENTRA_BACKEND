@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import threading
+from typing import Optional
 import time
 from typing import Optional
 
@@ -79,9 +80,12 @@ def load(path: str | None = None) -> None:
 
 # ── Devices ──────────────────────────────────────────────────────────────────
 
-def upsert_device(device_id: str, name: str = "", kind: str = "user",
+def upsert_device(device_id: str, name: str = "", kind: Optional[str] = None,
                   platform: str = "") -> dict:
-    """Register/update a device. Kind: 'node' (rover phone) | 'user'."""
+    """Register/update a device. Kind: 'node' (rover phone) | 'user'.
+    kind=None (the default) never changes an existing device's kind —
+    Phase 21 fix: core.auth.issue_session() calls this bare, which used to
+    clobber kind='node' back to 'user' on every token issue."""
     now = time.time()
     with _lock:
         d = _devices.get(device_id)

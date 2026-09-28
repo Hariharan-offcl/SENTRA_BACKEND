@@ -212,7 +212,8 @@ check("sim box JWT default detected in live snapshot",
       sec.get("clean") is False and sec.get("count", 0) >= 1, str(sec))
 check("simulation block still present", "simulation" in body)
 schema_paths = set(app.openapi()["paths"].keys())
-check("route count stable at 91", len(schema_paths) == 91, str(len(schema_paths)))
+check("route count >= 121 (Phase 21 owns exact count)",
+      len(schema_paths) >= 121, str(len(schema_paths)))
 
 # ── summary ──────────────────────────────────────────────────────────────────
 print(f"\n{'=' * 60}")
