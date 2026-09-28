@@ -71,10 +71,15 @@ def auth_login(body: dict):
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid role")
     device_registry.upsert_device(username, kind="user")
+    user = cm.user_object(username, app_role)
     return _ok({
         "token": session["token"],
         "refresh_token": session.get("refresh_token", ""),
-        "user": cm.user_object(username, app_role),
+        "user": user,
+        # Dual-shape: the spec's Global Conventions wrap responses in
+        # {"data": …} while the concrete §2a example is bare — serve both so
+        # either client-side parse finds the token.
+        "data": {"token": session["token"], "user": user},
     })
 
 
@@ -95,10 +100,12 @@ def auth_rover_pair(body: dict):
         session = core_auth.issue_session(device_id, "GUARD")  # rover may drive/estop
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    user = cm.user_object(device_id, "rover", robot_id=robot_id)
     return _ok({
         "token": session["token"],
         "refresh_token": session.get("refresh_token", ""),
-        "user": cm.user_object(device_id, "rover", robot_id=robot_id),
+        "user": user,
+        "data": {"token": session["token"], "user": user},  # dual-shape, see login
     })
 
 
@@ -117,7 +124,8 @@ def auth_me(request: Request):
         raise HTTPException(status_code=401, detail="Invalid token")
     app_role = ("rover" if ctx.kind == "node"
                 else cm.INTERNAL_ROLE_TO_APP.get(ctx.role, "user"))
-    return _ok(cm.user_object(ctx.device_id, app_role))
+    user = cm.user_object(ctx.device_id, app_role)
+    return _ok({**user, "data": user})  # dual-shape, see login
 
 
 @router.post("/auth/logout")
