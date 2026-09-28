@@ -43,7 +43,7 @@ POLL_INTERVAL_S = 0.1
 
 _h = None
 _h_owned = False          # True if we opened our own chip handle
-_simulated = not (CLIFF_ENABLED and _LGPIO_AVAILABLE)
+_simulated = not (CLIFF_ENABLED and _LGPIO_AVAILABLE) or core_config.SIMULATION  # Phase 18
 _state = {
     "left_cliff": False,
     "right_cliff": False,
@@ -59,7 +59,11 @@ _thread: threading.Thread | None = None
 def _init_hardware() -> None:
     """Claim cliff pins. Prefers the motor service's shared chip handle."""
     global _h, _h_owned, _simulated
-    if not CLIFF_ENABLED or not _LGPIO_AVAILABLE:
+    from core.simulation import activate_once
+    activate_once()  # Phase 18: simulation mode refuses GPIO init
+    if not CLIFF_ENABLED or not _LGPIO_AVAILABLE or core_config.SIMULATION:
+        if core_config.SIMULATION:
+            _simulated = True  # report simulated, not "hardware fresh"
         return
     try:
         from services.motor_service import _h as motor_h
@@ -83,7 +87,7 @@ def _init_hardware() -> None:
 
 
 def _read_once() -> tuple[bool, bool]:
-    if _h is None:
+    if _h is None or core_config.SIMULATION:
         return False, False  # simulated: never a cliff
     try:
         left_raw = lgpio.gpio_read(_h, CLIFF_LEFT_GPIO)

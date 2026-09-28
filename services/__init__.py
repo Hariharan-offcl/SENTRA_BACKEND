@@ -21,6 +21,8 @@ Stubs to be implemented in later phases:
     person_service     — Phases 10-11
     fall_detection_service — Phase 12
     notification_service   — Phase 14
+    relay_client           — Phase 16
+    system_metrics         — Phase 17
 """
 
 # Live services are imported by routers directly; stubs are created per phase.

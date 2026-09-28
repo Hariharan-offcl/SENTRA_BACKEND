@@ -37,6 +37,7 @@ except ImportError:
     _LGPIO_AVAILABLE = False
 
 from core import config as core_config
+from core.simulation import activate_once  # Phase 18
 
 ENCODERS_ENABLED = os.getenv("SENTRA_ENCODERS_ENABLED", "true").strip().lower() in (
     "1", "true", "yes", "on")
@@ -77,7 +78,8 @@ def _pins_collide() -> bool:
 
 def _init_hardware() -> None:
     global _h, _h_owned, _simulated
-    if not ENCODERS_ENABLED or not _LGPIO_AVAILABLE:
+    activate_once()  # Phase 18: simulation mode refuses GPIO init
+    if not ENCODERS_ENABLED or not _LGPIO_AVAILABLE or core_config.SIMULATION:
         return
     if _pins_collide():
         logger.warning(

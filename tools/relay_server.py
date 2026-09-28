@@ -112,12 +112,14 @@ def main() -> None:
     global SECRET
     ap = argparse.ArgumentParser(description="SENTRA reference relay server")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--host", default="0.0.0.0",
+                    help="bind address (use 127.0.0.1 behind a TLS proxy)")
     ap.add_argument("--secret", default=SECRET)
     args = ap.parse_args()
     SECRET = args.secret
     async def _serve() -> None:
-        async with websockets.serve(relay, "0.0.0.0", args.port):
-            log.info("Relay server listening on :%d", args.port)
+        async with websockets.serve(relay, args.host, args.port):
+            log.info("Relay server listening on %s:%d", args.host, args.port)
             await asyncio.Future()  # run until cancelled
 
     try:

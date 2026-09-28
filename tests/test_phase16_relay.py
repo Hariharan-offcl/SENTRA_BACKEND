@@ -214,7 +214,8 @@ check("all Phase 16 paths registered", new_paths <= schema_paths,
 check("earlier phases intact",
       {"/api/v1/devices", "/api/v1/auth/refresh", "/api/v1/notifications"}
       <= schema_paths)
-check("path count now 88", len(schema_paths) == 88, str(len(schema_paths)))
+check("path count >= 89 (Phase 17 owns exact count)",
+      len(schema_paths) >= 89, str(len(schema_paths)))
 
 # ── summary ──────────────────────────────────────────────────────────────────
 print(f"\n{'=' * 60}")

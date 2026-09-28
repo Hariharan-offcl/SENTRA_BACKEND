@@ -38,6 +38,7 @@ from routers import emergency as emergency_router
 from routers import notifications as notifications_router
 from routers import devices as devices_router
 from routers import relay as relay_router
+from routers import simulation as simulation_router  # Phase 18
 
 # WebSocket handlers
 from ws_handlers import telemetry_ws, control_ws, alerts_ws, call_ws
@@ -58,10 +59,20 @@ logger = logging.getLogger("sentra.main")
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────────
     host_ip = _get_local_ip()
+    from core import simulation as sim_mode  # Phase 18: mode is fixed at import
     logger.info("═══════════════════════════════════════════════")
     logger.info("  SENTRA Backend starting on %s:%d", host_ip, settings.port)
     logger.info("  Unit: %s  (%s)", settings.unit_name, settings.unit_id)
+    logger.info("  Mode: %s", sim_mode.describe())  # Phase 18
     logger.info("═══════════════════════════════════════════════")
+
+    # ── Phase 18: explicit simulation mode — preflight stop + loud banner ──
+    sim_mode.preflight_stop()
+    sim_mode.banner()
+
+    # ── Phase 20: startup security checks (log findings, never abort) ─────
+    from core import hardening
+    hardening.run_checks()
 
     # Start UDP broadcast discovery responder
     asyncio.create_task(start_udp_discovery(host_ip))
@@ -160,10 +171,19 @@ async def lifespan(app: FastAPI):
     # Ensure snapshot directory exists
     os.makedirs(settings.camera_snapshot_dir, exist_ok=True)
 
+    # ── Phase 20: systemd integration — watchdog heartbeat + READY=1 ─────
+    # No-ops when not running under systemd (Type=notify + WatchdogSec).
+    from core import sd_notify
+    sd_notify.heartbeat.start()
+    sd_notify.notify("READY=1")
+
     yield
 
     # ── Shutdown ─────────────────────────────────────────────────────────────
     logger.info("SENTRA Backend shutting down")
+    from core import sd_notify as _sd  # Phase 20
+    _sd.notify("STOPPING=1")
+    _sd.heartbeat.stop()
     from services import cliff_service, imu_service, encoder_service, sensor_service
     from services import vision_service
     cliff_service.stop_monitoring()
@@ -252,6 +272,7 @@ app.include_router(emergency_router.router)  # Phase 13: /api/v1/emergency/*
 app.include_router(notifications_router.router)  # Phase 14: /api/v1/notifications/*
 app.include_router(devices_router.router)  # Phase 15: /api/v1/devices/*
 app.include_router(relay_router.router)  # Phase 16: /api/v1/relay/*            # Phase 12: /api/v1/fall/*
+app.include_router(simulation_router.router)  # Phase 18: /api/v1/simulation/*
 
 # ── Mount WebSocket routers ───────────────────────────────────────────────────
 app.include_router(telemetry_ws.router)

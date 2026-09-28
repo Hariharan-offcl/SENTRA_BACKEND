@@ -3,6 +3,7 @@ Router: System endpoints
   GET  /api/v1/ping
   GET  /api/v1/system/info
   GET  /api/v1/system/capabilities
+  GET  /api/v1/system/status      (Phase 17: real CPU/RAM/temp/disk metrics)
   POST /api/v1/system/reboot
 """
 
@@ -18,6 +19,7 @@ from models.responses import (
     SystemInfoResponse,
     CapabilitiesResponse,
     RebootResponse,
+    SystemStatusResponse,
 )
 
 router = APIRouter(prefix="/api/v1", tags=["System"])
@@ -57,6 +59,18 @@ def system_capabilities():
         night_vision_ir=True,
         acoustic_alarm_speaker=True,
     )
+
+
+@router.get("/system/status", response_model=SystemStatusResponse)
+def system_status():
+    """
+    Phase 17: real host health snapshot — CPU, RAM, swap, disk, SoC
+    temperature, load and backend-process stats. psutil-backed; fields the
+    platform cannot measure come back null (e.g. temperature on Windows dev).
+    Used by the app's Diagnostics screen and by relay remote monitoring.
+    """
+    from services import system_metrics  # lazy: keeps router import cheap
+    return SystemStatusResponse(**system_metrics.get_system_status())
 
 
 @router.post("/system/reboot", response_model=RebootResponse)

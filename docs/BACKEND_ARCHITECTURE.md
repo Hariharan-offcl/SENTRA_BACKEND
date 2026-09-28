@@ -223,24 +223,25 @@ Missing: no hardware watchdog (PWM keeps its last duty if the process crashes �
 
 | Phase target | Status today |
 |---|---|
-| Central robot state machine (MANUAL/PATROL/NAV/EMERGENCY_STOP/...) | Partial — free-string `mode`, no mode arbitration |
-| Safety service (obstacle/timeout/cliff/mode separation) | Missing |
-| Unified sensor service (front/rear/cliff/IMU/encoders) | Partial — ultrasonic real, rest simulated |
-| AprilTag localization service + tag map | Missing |
-| Manual mapping APIs (`/map/*`) | Missing |
-| Patrol routes / waypoints / `/patrol/*` APIs | Missing (wander loop only) |
-| Dock / return-to-dock | Missing |
-| Voice command intake (`/voice/command`) | Missing |
-| Person detection / recognition | Missing |
-| Fall detection + temporal confirmation | Missing |
-| Automatic call on fall + call lifecycle APIs | Missing (manual call infra exists) |
-| Notification service (WS push of real events) | Missing (`broadcast_alert` unused) |
-| Device roles (rover phone vs user phone) + enforced auth | Missing |
-| Remote access / cloud relay design | Missing |
-| `/system/status` with real CPU/RAM/temp/disk | Partial (vcgencmd temp only, inside telemetry) |
-| Simulation mode (`SENTRA_SIMULATION`) | Implicit dev no-ops, not an explicit mode |
-| systemd service | Missing |
-| Test suite | Missing |
+| Central robot state machine (MANUAL/PATROL/NAV/RETURN_TO_DOCK/…) | ✅ Phase 1 (mode arbitration + owners) |
+| Safety service (obstacle/timeout/cliff/mode separation) | ✅ Phases 1-3 (core/safety layer) |
+| Unified sensor service (front/rear/cliff/IMU/encoders) | ✅ Phase 4 (health per sensor) |
+| AprilTag localization service + tag map | ✅ Phase 5 |
+| Manual mapping APIs (`/map/*`) | ✅ Phase 6 |
+| Patrol routes / waypoints / `/patrol/*` APIs | ✅ Phase 7 (engine + persistence) |
+| Dock / return-to-dock | ✅ Phase 8 |
+| Voice command intake (`/voice/command`) | ✅ Phase 9 |
+| Person detection / recognition | ✅ Phases 10-11 |
+| Fall detection + temporal confirmation | ✅ Phase 12 |
+| Automatic call on fall + call lifecycle APIs | ✅ Phase 13 |
+| Notification service (WS push of real events) | ✅ Phase 14 (persistent + push) |
+| Device roles (rover phone vs user phone) + enforced auth | ✅ Phase 15 (JWT + registry + middleware) |
+| Remote access / cloud relay design | ✅ Phase 16 (tunnel + DANGER push) |
+| `/system/status` with real CPU/RAM/temp/disk | ✅ Phase 17 (psutil, real metrics) |
+| Simulation mode (`SENTRA_SIMULATION`) | ✅ Phase 18 (explicit mode: GPIO/I2C refused, preflight stop, banner) |
+| systemd service | ✅ Phase 19 (hardened units + installer + env template) |
+| Test suite | ✅ Phases 1-20 (20 suites, 681 tests, all green) |
+| Startup hardening / watchdog | ✅ Phase 20 (security checks + sd_notify watchdog) |
 
 ## 15. What Must Be Preserved (frontend contract)
 
@@ -1205,3 +1206,298 @@ SENTRA unit (Pi, behind NAT)                relay server (VPS)            caregi
 3. 256 KB response cap excludes large payloads (video frames, map images) from the tunnel.
 4. Pushes are dropped when the tunnel is down (no store-and-forward); the app recovers by pulling notifications on reconnect.
 5. One app connection per probe script in tests; the relay supports N bound apps per unit but fan-out under load is untested.
+
+## 33. Phase 17 — Real System Metrics (2026-09-28)
+
+### Model
+
+```
+GET /api/v1/system/status
+  └─ services/system_metrics.py (psutil; every read individually guarded)
+       cpu:      percent (short blocking sample), count, freq, load_avg
+       memory:   total/used MB, percent          (swap too)
+       disk:     total/used/free GB, percent      (root partition)
+       temp:     vcgencmd (Pi) → psutil thermal zones → cached last good
+       process:  backend rss / threads / conns / cpu / uptime
+```
+
+- **No fake values**: a metric the platform cannot measure comes back `null`
+  (temperature on Windows dev boxes), never a plausible-looking constant —
+  the app can distinguish "unknown" from "cold".
+- Degraded mode: if psutil is somehow absent the endpoint still returns 200
+  with `source: "simulated"` and null readouts (uptime via `time.time()`
+  fallback).
+- vcgencmd probe is cached (one attempt, then short-circuit) so dev boxes
+  never pay a 1 s subprocess timeout per request; last good temp is cached
+  too (thermal zones can fail transiently).
+- Open path: GET requests are unauthenticated by design (Phase 15 policy),
+  matching `/ping` / `/telemetry/*`; diagnostics may need to work pre-login.
+
+### New/changed files
+
+| File | Purpose |
+|---|---|
+| `services/system_metrics.py` | NEW — psutil snapshot: cpu/mem/swap/disk/temp/process, `read_soc_temperature()` with vcgencmd→psutil fallback + caches. |
+| `routers/system.py` | Added `GET /system/status` (lazy service import, response model). |
+| `models/responses.py` | Added `CpuStatus` / `MemStatus` / `DiskStatus` / `ProcessStatus` / `SystemStatusResponse`. |
+| `requirements.txt` | Pinned `psutil>=6.0.0` (was used-but-unpinned since Phase 5). |
+| `tests/test_phase17_system.py` | 25 tests (service, vcgencmd cache, degraded mode, handler, E2E via dispatch bridge, routes). |
+
+### APIs added (Phase 17)
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/system/status` | Real host health: cpu/memory/swap/disk/temperature_c/process/source. Fields null when unmeasurable. |
+
+### Verification performed (Phase 17)
+
+- 25/25 tests incl. real-psutil snapshot assertions, faked vcgencmd parse
+  (52.3 °C) + failed-probe cache, no-psutil degraded mode, and **E2E through
+  the Phase 16 ASGI dispatch bridge** (auth middleware active) — 89 paths.
+- Full regression: **575 passed, 0 failed** across 17 suites.
+- Live on :8099: `/system/status` returned real dev-host metrics
+  (cpu 9.2 % of 20 cores @ 3600 MHz, 65345 MB RAM @ 14.8 %, disk 41.5 %,
+  rss 98.8 MB, temperature null on Windows as designed) with no token;
+  unauthenticated `POST /system/reboot` correctly → 401 (middleware intact).
+
+### Known limitations (Phase 17)
+
+1. `cpu_percent` uses a short blocking sample (~0.2 s) per request — fine for
+   diagnostics polling, not for 10 Hz loops.
+2. Load average is null on Windows (no OS concept); on the Pi it is real.
+3. No historical buffer: point-in-time only; trend charts are the app's job
+   (or a later ring-buffer service).
+4. Disk is the root partition only; multi-drive Pi setups would need per-mount
+   breakdowns.
+5. Battery is still telemetry_service sim data — real ADC/battery-hat reading
+   is a Pi-hardware task, tracked separately from this phase.
+
+## 34. Phase 18 — Explicit Simulation Mode (2026-09-28)
+
+### Model
+
+```
+SENTRA_SIMULATION=true  (read ONCE at import; latched for the process)
+  ├─ core/simulation.py    is_active / activate_once / check_env_override /
+  │                        preflight_stop / banner / status / describe
+  ├─ hardware init points  motor · cliff · ultrasonic · IMU · encoder
+  │                        → refuse GPIO / I2C while the flag is set
+  ├─ safety layer          force_stop("simulation_preflight") at startup
+  └─ observability         Mode: line in the startup banner, loud !!! banner,
+                           GET /api/v1/simulation, /system/status.simulation
+```
+
+- **Why**: previously the flag was parsed but never read — simulation was an
+  *accident* of missing libraries. On a real Pi 5 with lgpio installed,
+  `SENTRA_SIMULATION=true` would still have driven real GPIO. Now every init
+  point refuses hardware by config, proven by tests with a **fake lgpio**
+  (init refused even when `import lgpio` succeeds — the exact Pi risk).
+- `activate_once()` is called before every claim attempt: the mode latches at
+  the first init and cannot be un-latched; `check_env_override(device, enabled)`
+  composes with per-service `*_ENABLED` env vars (simulation wins).
+- **No runtime flipping**: the mode is fixed at process start — toggling
+  requires a restart, which is the safe direction (real→sim always possible;
+  sim→real requires a deliberate reboot with hardware attached).
+- Cliff fix: `_simulated` now honours the flag too, so the Phase 4 health
+  aggregator reports `SIMULATED` instead of `FRESH` for refused sensors.
+- Autonomous actors need no changes: with motors refused, ultrasonic reads
+  return `MAX_DIST` (2.0 m) and cliff reads return False, so patrol/dock/nav
+  loops run but never see obstacles or cliffs — and can never move hardware.
+
+### New/changed files
+
+| File | Purpose |
+|---|---|
+| `core/simulation.py` | NEW — mode latch, per-service gate, preflight stop, banner, status/describe. |
+| `services/motor_service.py`, `cliff_service.py`, `ultrasonic_service.py`, `imu_service.py`, `encoder_service.py` | Init points call `activate_once()` and refuse GPIO/I2C under the flag; cliff `_simulated` honours it. |
+| `services/system_metrics.py` | Snapshot carries `simulation` block (real + degraded mode). |
+| `main.py` | Lifespan: `Mode:` log line, `preflight_stop()`, `banner()`; simulation router mounted. |
+| `routers/simulation.py`, `models/responses.py` | `GET /api/v1/simulation`, `POST /api/v1/simulation/status` (auth-gated mirror); `SimulationStatus` model. |
+| `core/config.py` | Comment upgraded: flag is now an explicit mode backed by `core/simulation.py`. |
+| `tests/test_phase18_simulation.py` | 41 tests incl. fake-lgpio real-vs-sim matrix. |
+
+### APIs added (Phase 18)
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/simulation` | `{simulation, env_var, latched, hardware_disabled, preflight_stop}` (open, read-only). |
+| `POST /api/v1/simulation/status` | Same payload as POST (auth-gated probe mirror). |
+| `GET /api/v1/system/status` (extended) | Now includes the `simulation` block in every snapshot. |
+
+### Verification performed (Phase 18)
+
+- 41/41 tests: latch/override/preflight/banner semantics; **fake-lgpio
+  real-vs-sim matrix** — real mode claims pins (motor chip, cliff, ultrasonic,
+  encoders), sim mode performs ZERO GPIO claims and refuses the I2C bus with
+  lgpio importable; router handlers; E2E through the dispatch bridge (incl.
+  unauthenticated POST mirror → 401); 91 openapi paths.
+- Full regression: **616 passed, 0 failed** across 18 suites.
+- Live on :8099, both modes:
+  - `SENTRA_SIMULATION=false`: `Mode: REAL (hardware enabled where available)`,
+    `/simulation` → `{simulation:false, latched:true, preflight_stop:null}`,
+    **no banner** (0 occurrences).
+  - `SENTRA_SIMULATION=true`: banner `!!  SENTRA IS RUNNING IN SIMULATION MODE  !!`,
+    preflight log `motors forced to zero (simulation_preflight)`, latched
+    warning from init points, `/simulation` → `{simulation:true,
+    hardware_disabled:true, preflight_stop:{forced:simulation_preflight}}`.
+
+### Known limitations (Phase 18)
+
+1. Telemetry battery/latency values remain simulated in **both** modes — a real
+   battery-hat/ADC is a hardware task.
+2. `SENTRA_SIMULATION` is process-wide; per-device simulation granularity
+   (e.g. real cliff + fake IMU) is composed via `check_env_override` later.
+3. The mode is read at import time: modules must be reloaded (tests) or the
+   process restarted (production) to change it — intentional.
+4. Simulated ultrasonic flat-lines at `MAX_DIST`; a scripted obstacle simulator
+   (like `/fall/simulate` for falls) is future work.
+
+## 35. Phase 19 — systemd Service + Pi 5 Deployment (2026-09-28)
+
+### Layout
+
+```
+deploy/
+  sentra-backend.service   Pi 5 unit: venv uvicorn :8080, Restart=always,
+                           ProtectSystem=strict, DeviceAllow gpiochip/i2c,
+                           EnvironmentFile=/opt/sentra/.env
+  sentra-relay.service     VPS reference relay: tools/relay_server.py on
+                           127.0.0.1:8765 (TLS terminated by nginx/Caddy),
+                           isolated user, minimal profile
+  env.template             every env var (Phases 0-18) with defaults + notes;
+                           PLAIN names → config.py pydantic Settings,
+                           SENTRA_* names → os.getenv() in modules
+  install.sh               idempotent Pi bootstrap: user w/ gpio+i2c+spi →
+                           rsync to /opt/sentra → venv → .env (JWT secret
+                           auto-generated, never overwritten) → unit →
+                           enable --now → wait for /api/v1/ping
+  README.md                runbooks for both targets + production checklist
+```
+
+- Backend runs as the dedicated `sentra` user (gpio/i2c/spi groups) from
+  `/opt/sentra` with its own venv; `Restart=always` + `RestartSec=5s` so a
+  rover backend always comes back; `network-online.target` ordering because
+  UDP discovery and the relay dial out at startup.
+- Relay server gained `--host` (Phase 16 tool): bind loopback behind a TLS
+  proxy instead of exposing 8765 to the world; verified live via subprocess.
+- **Env-drift guard**: test_phase19 parses env.template and asserts every
+  name exists in code — this caught that pydantic Settings has no env prefix,
+  so `SENTRA_JWT_SECRET`/`SENTRA_PORT`-style names would have been silently
+  ignored; the template uses the project's real conventions
+  (`JWT_SECRET_KEY`, `PORT`, …).
+
+### New/changed files
+
+| File | Purpose |
+|---|---|
+| `deploy/sentra-backend.service` | Hardened systemd unit for the Pi 5 backend. |
+| `deploy/sentra-relay.service` | Systemd unit for the VPS relay (loopback bind). |
+| `deploy/env.template` | All documented env vars; JWT default forbidden. |
+| `deploy/install.sh` | Idempotent installer (bash -n verified). |
+| `deploy/README.md` | Unit + relay runbooks, ops commands, checklist. |
+| `tools/relay_server.py` | Added `--host` flag (default unchanged 0.0.0.0). |
+| `tests/test_phase19_deploy.py` | 34 tests: unit integrity, drift guard, live relay subprocess, route stability. |
+
+### APIs added (Phase 19)
+
+None — deployment phase; route count stays **91** (asserted).
+
+### Verification performed (Phase 19)
+
+- 34/34 tests: both systemd units' structure (ExecStart/EnvironmentFile/
+  Restart/hardening/DeviceAllow), installer `bash -n` + idempotency markers,
+  env drift guard both directions (≥ 20 names vs the whole codebase),
+  runbook checklist, **live relay subprocess** on `--host 127.0.0.1`
+  (handshake answered, bad secret → `hello_error`), and route stability (91).
+- Full regression: **650 passed, 0 failed** across 19 suites.
+- Live on :8099: `/ping` online, startup log `Mode: REAL (hardware enabled
+  where available)` (exactly what the unit's ExecStart produces),
+  `/relay/status` → `enabled: false` matching the shipped env default.
+
+### Known limitations (Phase 19)
+
+1. systemd semantics (`systemd-analyze verify`, cgroup behaviour) can only be
+   fully validated on Linux; on Windows dev the units are validated
+   structurally + the installer syntactically.
+2. `ReadWritePaths=/opt/sentra ~/sentra_data` assumes the standard paths;
+   custom `SENTRA_*_PATH` locations need matching unit edits.
+3. Relay scaling (Redis pub/sub, N replicas) is documented, not implemented —
+   the reference broker stays single-instance.
+4. No log-rotation/monitoring story yet (journald defaults); a watchdog
+   (`WatchdogSec` + sd_notify) is a natural Phase 20 hardening item.
+
+## 36. Phase 20 — Final Hardening + Review (2026-09-28)
+
+### Model
+
+```
+startup (lifespan)
+  ├─ core/hardening.run_checks()   log SECURITY findings (never abort)
+  └─ core/sd_notify.heartbeat.start() + notify("READY=1")
+       ├─ Type=notify + WatchdogSec=30s → pings WATCHDOG=1 every 15 s
+       └─ off-systemd (dev/tests): everything a silent no-op
+
+GET /api/v1/system/status → security block (checked_at_startup, findings[],
+                            count, clean) merged into every snapshot
+shutdown → notify("STOPPING=1") + heartbeat.stop()
+```
+
+- **Hardening checks** (surfaced, not enforced — bricking an assistance rover
+  over a default secret is worse than the risk): JWT secret still the shipped
+  default → anyone can mint OWNER tokens; `SENTRA_AUTH_ENFORCED=false`;
+  relay enabled with default shared secret; relay on cleartext `ws://`.
+- **Watchdog** covers the failure mode restart-on-exit cannot: a wedged
+  process (GIL-starved threads, blocked C extension) that never exits.
+  Minimal stdlib sd_notify client — no systemd Python package; abstract
+  `@`-sockets supported.
+- Unit upgraded to `Type=notify` + `WatchdogSec=30s` + `TimeoutStartSec=90s`.
+
+### New/changed files
+
+| File | Purpose |
+|---|---|
+| `core/hardening.py` | NEW — startup security checks + `summary()` for status. |
+| `core/sd_notify.py` | NEW — sd_notify client + `WatchdogHeartbeat` (no-ops off systemd). |
+| `main.py` | Lifespan: checks at startup, READY=1/heartbeat, STOPPING=1/stop at shutdown. |
+| `services/system_metrics.py`, `models/responses.py` | `security` block in `/system/status` (`SecurityFinding`/`SecurityStatus`). |
+| `deploy/sentra-backend.service` | `Type=notify`, `WatchdogSec=30s`, `TimeoutStartSec=90s`. |
+| `deploy/README.md` | Checklist item: no `SECURITY:` warnings at startup. |
+| `tests/test_phase20_hardening.py` | 31 tests incl. cross-platform socket injection + Linux-only real-socket path. |
+
+### APIs added (Phase 20)
+
+None — `GET /api/v1/system/status` extended with the `security` block;
+route count stays **91** (asserted).
+
+### Verification performed (Phase 20)
+
+- 31/31 tests: all finding conditions + clean case; **dev-box realism** —
+  the shipped JWT default is active here, so the live snapshot is expected to
+  be non-clean (a passing suite that reports clean would mean the check is
+  broken); off-systemd no-ops; watchdog pings via injected socket incl.
+  send-failure degradation; real AF_UNIX path auto-runs on Linux/Pi;
+  deploy-unit assertions; routes stable at 91.
+- Full regression: **681 passed, 0 failed** across 20 suites.
+- Live on :8099: `/ping` online; `SECURITY: [JWT_DEFAULT_SECRET] …` warning
+  in the startup log; `security` block served with `count: 1, clean: false`;
+  heartbeat correctly silent off-systemd.
+
+### Known limitations (Phase 20)
+
+1. Findings are warnings, not enforcement — by design (assistance device must
+   always boot); deployment checklist covers the human gate.
+2. `run_checks()` re-evaluates env per call (summary reflects current env,
+   not the startup instant) — cheap and honest, but findings could in theory
+   differ from the startup log if env changed.
+3. `WatchdogHeartbeat` does not verify the event loop is responsive (only
+   that the process can run a thread); a loop-liveness ping is future work.
+4. Real-socket sd_notify path is exercised on Linux only (auto-skipped on
+   Windows dev).
+
+### Plan closure
+
+All 20 phases delivered: **681 tests green across 20 suites, 91 OpenAPI
+paths, 9 WS channels, docs through §36.** The §14 audit table above is fully
+green. Remaining work is hardware-attach validation on the Pi 5 (real GPIO,
+I2C, battery ADC) and production secret rotation — operational tasks beyond
+the backend plan.

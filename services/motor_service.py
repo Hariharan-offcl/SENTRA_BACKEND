@@ -62,7 +62,9 @@ _gpio_lock = threading.Lock()  # lgpio chip handle is not thread-safe
 
 def _init_hardware():
     global _h
-    if not _LGPIO_AVAILABLE:
+    from core.simulation import activate_once
+    activate_once()  # Phase 18: simulation mode refuses GPIO init
+    if not _LGPIO_AVAILABLE or core_config.SIMULATION:
         return
     try:
         _h = lgpio.gpiochip_open(4)  # Pi 5 main GPIO chip

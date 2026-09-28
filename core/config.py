@@ -15,8 +15,10 @@ import os
 
 # ── Simulation ────────────────────────────────────────────────────────────────
 # SENTRA_SIMULATION=true → fake sensors, GPIO writes become no-ops.
-# Phase 18 will expand this; the flag exists from day one so the safety layer
-# can behave identically in both modes.
+# Phase 18: this flag is now an EXPLICIT mode — core/simulation.py latches it
+# per process, hardware init points (motor/cliff/ultrasonic/IMU/encoder) refuse
+# GPIO/I2C while it is set, and the safety layer force-stops motors at startup.
+# Keep this module-level bool: services read it synchronously at init time.
 SIMULATION = os.getenv("SENTRA_SIMULATION", "false").strip().lower() in ("1", "true", "yes", "on")
 
 # ── Safety thresholds (Phase 3 will expose these via settings API) ───────────

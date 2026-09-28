@@ -36,6 +36,72 @@ class RebootResponse(BaseModel):
     message: str
 
 
+class CpuStatus(BaseModel):
+    percent: Optional[float] = None
+    count: Optional[int] = None
+    freq_mhz: Optional[float] = None
+    load_avg: Optional[List[float]] = None
+
+
+class MemStatus(BaseModel):
+    total_mb: Optional[float] = None
+    used_mb: Optional[float] = None
+    percent: Optional[float] = None
+
+
+class DiskStatus(BaseModel):
+    total_gb: Optional[float] = None
+    used_gb: Optional[float] = None
+    percent: Optional[float] = None
+    free_gb: Optional[float] = None
+
+
+class ProcessStatus(BaseModel):
+    rss_mb: Optional[float] = None
+    threads: Optional[int] = None
+    connections: Optional[int] = None
+    cpu_percent: Optional[float] = None
+    uptime_s: Optional[int] = None
+
+
+class SimulationStatus(BaseModel):
+    """Phase 18: explicit simulation mode state."""
+    simulation: bool
+    env_var: str
+    latched: bool
+    hardware_disabled: bool
+    preflight_stop: Optional[dict] = None
+
+
+class SecurityFinding(BaseModel):
+    id: str
+    severity: str
+    detail: str
+
+
+class SecurityStatus(BaseModel):
+    """Phase 20: startup security-check summary."""
+    checked_at_startup: bool
+    findings: List[SecurityFinding]
+    count: int
+    clean: bool
+
+
+class SystemStatusResponse(BaseModel):
+    """Phase 17: real host metrics. `null` = not measurable on this platform."""
+    timestamp: int
+    uptime_s: int
+    cpu: CpuStatus
+    memory: MemStatus
+    swap: MemStatus
+    disk: DiskStatus
+    temperature_c: Optional[float] = None
+    process: ProcessStatus
+    simulation: SimulationStatus
+    security: SecurityStatus
+    source: str
+
+
 # ── Auth ─────────────────────────────────────────────────────────────────────
 
 class AuthSessionResponse(BaseModel):

@@ -10,6 +10,9 @@ try:
 except ImportError:
     _LGPIO_AVAILABLE = False
 
+from core import config as core_config
+from core.simulation import activate_once  # Phase 18
+
 FRONT_TRIG = 24
 FRONT_ECHO = 25
 
@@ -21,8 +24,10 @@ _h = None
 
 def _init_hardware():
     global _h
-    if not _LGPIO_AVAILABLE:
-        logger.warning("lgpio not found. Ultrasonic real hardware disabled.")
+    activate_once()  # Phase 18: simulation mode refuses GPIO init
+    if not _LGPIO_AVAILABLE or core_config.SIMULATION:
+        logger.warning("Ultrasonic hardware disabled (lgpio missing or "
+                       "simulation mode)")
         return
     try:
         from services.motor_service import _h as motor_h
@@ -43,7 +48,7 @@ def _init_hardware():
         _h = None
 
 def measure_distance(trig, echo):
-    if _h is None:
+    if _h is None or core_config.SIMULATION:
         return MAX_DIST
 
     try:

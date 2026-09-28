@@ -24,12 +24,16 @@ import os
 import threading
 import time
 
+from core import config as core_config  # Phase 18
+
 logger = logging.getLogger(__name__)
 
 IMU_ENABLED = os.getenv("SENTRA_IMU_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
 IMU_BUS = int(os.getenv("SENTRA_IMU_BUS", "1"))
 IMU_ADDR = int(os.getenv("SENTRA_IMU_ADDR", "0x68"), 16)
 IMU_POLL_S = float(os.getenv("SENTRA_IMU_POLL_S", "0.05"))
+
+from core.simulation import activate_once  # Phase 18
 
 # MPU6050 registers
 _REG_PWR_MGMT_1 = 0x6B
@@ -55,6 +59,10 @@ _smbus = None
 
 def _init_bus():
     """Open the I2C bus; returns None in simulation."""
+    activate_once()  # Phase 18: simulation mode refuses I2C init
+    if core_config.SIMULATION:
+        logger.warning("IMU: simulation mode — I2C bus refused")
+        return None
     try:
         from smbus2 import SMBus
         bus = SMBus(IMU_BUS)
