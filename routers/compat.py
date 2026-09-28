@@ -149,9 +149,21 @@ def get_robot(robot_id: str):
     return _ok(cm.robot_object())
 
 
-@router.post("/robots/{robot_id}/mode")
+@router.get("/robots/{robot_id}/mode")
+def get_mode(robot_id: str):
+    """App reads the current mode (Flutter impl probes GET before PATCH)."""
+    if robot_id != cm.ROBOT_ID:
+        raise HTTPException(status_code=404, detail="unknown robot_id")
+    return _ok({**cm.robot_object(), "mode": cm.app_mode()})
+
+
+@router.api_route("/robots/{robot_id}/mode", methods=["POST", "PATCH", "PUT"])
 def change_mode(robot_id: str, body: dict):
-    """App spec §3c: idle/manual/mapping/patrol/auto/docking → internal modes."""
+    """App spec §3c: idle/manual/mapping/patrol/auto/docking → internal modes.
+    PATCH/PUT accepted too — the Flutter impl uses PATCH."""
+    if robot_id != cm.ROBOT_ID:
+        raise HTTPException(status_code=404, detail="unknown robot_id")
+    app_mode = str((body or {}).get("mode", "")).strip().lower()
     from services import motor_service, patrol_service, docking_service, navigation_service
     app_mode = str((body or {}).get("mode", "")).strip().lower()
     if app_mode not in cm.APP_TO_MODE:
