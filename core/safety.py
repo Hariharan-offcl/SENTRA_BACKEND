@@ -279,9 +279,16 @@ class SafetyLayer:
                                                 "threshold_m": rear_stop}})
 
         # 6) Speed clamp (runtime-configurable ceiling)
-        max_abs = 100.0 * cfg.get("max_speed_multiplier")
-        left_pct = max(-max_abs, min(max_abs, left_pct))
-        right_pct = max(-max_abs, min(max_abs, right_pct))
+        # Allow full power (100%) if in MANUAL mode (boost handled by app)
+        # otherwise clamp to the configured ceiling for autonomy.
+        if mode != "MANUAL":
+            max_abs = 100.0 * cfg.get("max_speed_multiplier")
+            left_pct = max(-max_abs, min(max_abs, left_pct))
+            right_pct = max(-max_abs, min(max_abs, right_pct))
+        else:
+            # In MANUAL, trust the operator's request up to hardware limits
+            left_pct = max(-100.0, min(100.0, left_pct))
+            right_pct = max(-100.0, min(100.0, right_pct))
 
         # All checks passed → apply
         apply_fn = self._motor_apply
