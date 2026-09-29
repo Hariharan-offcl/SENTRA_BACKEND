@@ -17,11 +17,17 @@ Every N frames the worker reports a PERSON event to /ws/alerts.
 
 Env vars:
     SENTRA_PERSON_ENABLED     (default true)
-    SENTRA_PERSON_BACKEND     (default simulation: hog|simulation)
+    SENTRA_PERSON_BACKEND     (default auto: auto|hog|simulation — auto picks
+                               hog when OpenCV is importable, else simulation)
     SENTRA_PERSON_POLL_S      (default 0.1 — worker pull rate)
     SENTRA_PERSON_MAX_AGE_S   (default 1.5 — tracked person considered gone)
     SENTRA_PERSON_MIN_CONF    (default 0.5)
     SENTRA_PERSON_EVENT_EVERY (default 3 — one event per N tracked updates)
+    SENTRA_PERSON_HOG_WIDTH   (default 640 — frames are downscaled to this
+                               width before detection; lower = faster)
+    SENTRA_PERSON_HOG_WINSTRIDE (default 8 — HOG window stride; higher = faster,
+                               coarser)
+    SENTRA_PERSON_HOG_SCALE   (default 1.05 — HOG image pyramid scale)
 """
 
 from __future__ import annotations
@@ -46,11 +52,18 @@ from services import safety_events
 
 PERSON_ENABLED = os.getenv("SENTRA_PERSON_ENABLED", "true").strip().lower() in (
     "1", "true", "yes", "on")
-PERSON_BACKEND = os.getenv("SENTRA_PERSON_BACKEND", "simulation").strip().lower()
+PERSON_BACKEND = os.getenv("SENTRA_PERSON_BACKEND", "auto").strip().lower()
 POLL_S = float(os.getenv("SENTRA_PERSON_POLL_S", "0.1"))
 MAX_AGE_S = float(os.getenv("SENTRA_PERSON_MAX_AGE_S", "1.5"))
 MIN_CONF = float(os.getenv("SENTRA_PERSON_MIN_CONF", "0.5"))
 EVENT_EVERY = int(os.getenv("SENTRA_PERSON_EVENT_EVERY", "3"))
+
+# Phase 6: HOG tuning knobs (Pi 5 CPU budget: detection runs on the worker
+# thread at ~10 Hz; ~640px + stride 8 lands in the tens-of-ms range on x86
+# and a few hundred ms on the Pi — measure via stats().avg_detect_ms).
+HOG_DOWNSCALE_W = max(160, int(os.getenv("SENTRA_PERSON_HOG_WIDTH", "640")))
+HOG_WINSTRIDE = max(2, int(os.getenv("SENTRA_PERSON_HOG_WINSTRIDE", "8")))
+HOG_SCALE = max(1.01, float(os.getenv("SENTRA_PERSON_HOG_SCALE", "1.05")))
 
 HISTORY_MAX = 100
 QUEUE_MAX = 1  # worker processes the newest frame only
@@ -62,6 +75,9 @@ _next_pid = 1
 _frames_seen = 0
 _updates_since_event = 0
 _backend_status = "unavailable"    # unavailable | simulation | hog | failed
+_resolved_backend = "unavailable"  # what the worker actually picked (auto → hog/sim)
+_detect_ms_ema: Optional[float] = None   # exponential average of detect time
+_last_detect_ms: Optional[float] = None
 _stop_event = threading.Event()
 _thread: threading.Thread | None = None
 _queue: deque = deque(maxlen=QUEUE_MAX)
@@ -82,7 +98,8 @@ def _get_hog():
 
 
 def _detect_hog(frame) -> list[dict]:
-    """OpenCV HOG pedestrian detection. Returns [{bbox, confidence}]."""
+    """OpenCV HOG pedestrian detection. Returns [{bbox, confidence}].
+    Tunables: HOG_DOWNSCALE_W / HOG_WINSTRIDE / HOG_SCALE (env)."""
     global _backend_status
     hog = _get_hog()
     if hog is None:
@@ -91,13 +108,24 @@ def _detect_hog(frame) -> list[dict]:
     try:
         # Downscale for speed; HOG wants ~64x128 windows
         h, w = frame.shape[:2]
-        scale = 640.0 / w if w > 640 else 1.0
+        scale = HOG_DOWNSCALE_W / float(w) if w > HOG_DOWNSCALE_W else 1.0
         if scale < 1.0:
             frame_s = cv2.resize(frame, (int(w * scale), int(h * scale)))
         else:
             frame_s = frame
-        rects, weights = hog.detectMultiScale(frame_s, winStride=(8, 8),
-                                              padding=(4, 4), scale=1.05)
+        rects, weights = None, None
+        # HOG's detection window is 64x128 — handing it a smaller frame makes
+        # OpenCV throw through the C++ boundary, which can corrupt the heap
+        # (observed as 0xC0000374 on Windows). Guard the pipeline instead.
+        if frame_s.shape[0] >= 128 and frame_s.shape[1] >= 64:
+            rects, weights = hog.detectMultiScale(
+                frame_s, winStride=(HOG_WINSTRIDE, HOG_WINSTRIDE),
+                padding=(4, 4), scale=HOG_SCALE)
+        else:
+            logger.debug("HOG skipped: frame %dx%d below 64x128 window",
+                         frame_s.shape[1], frame_s.shape[0])
+            _backend_status = "hog"
+            return []
         out = []
         for (x, y, rw, rh), weight in zip(rects, weights):
             conf = float(min(1.0, max(0.0, weight)))
@@ -235,14 +263,23 @@ def _on_frame(frame, frame_id: str) -> None:
         pass
 
 
+def resolve_backend_name() -> str:
+    """Phase 6: 'auto' picks hog when OpenCV is importable, else simulation.
+    Explicit hog/simulation requests are honored (hog degrades to simulation
+    without cv2)."""
+    if PERSON_BACKEND in ("hog", "simulation"):
+        return PERSON_BACKEND if (PERSON_BACKEND == "simulation" or _CV_OK) \
+            else "simulation"
+    return "hog" if _CV_OK else "simulation"  # auto
+
+
 def _worker_loop() -> None:
-    global _frames_seen
-    backend = _BACKENDS.get(PERSON_BACKEND, _detect_simulation)
-    if PERSON_BACKEND == "hog" and not _CV_OK:
-        backend = _detect_simulation
-    logger.info("Person detection worker started (backend=%s, poll=%.2fs)",
-                PERSON_BACKEND if PERSON_BACKEND in _BACKENDS else "simulation",
-                POLL_S)
+    global _frames_seen, _resolved_backend, _last_detect_ms, _detect_ms_ema
+    name = resolve_backend_name()
+    backend = _BACKENDS.get(name, _detect_simulation)
+    _resolved_backend = name
+    logger.info("Person detection worker started (backend=%s requested=%s, poll=%.2fs)",
+                name, PERSON_BACKEND, POLL_S)
     while not _stop_event.is_set():
         try:
             frame, frame_id = _queue.popleft()
@@ -250,7 +287,12 @@ def _worker_loop() -> None:
             _stop_event.wait(POLL_S)
             continue
         _frames_seen += 1
+        t0 = time.perf_counter()
         detections = backend(frame)
+        ms = (time.perf_counter() - t0) * 1000.0
+        _last_detect_ms = ms
+        _detect_ms_ema = ms if _detect_ms_ema is None \
+            else (0.7 * _detect_ms_ema + 0.3 * ms)
         _process_detections(detections, frame_id)
         _stop_event.wait(POLL_S)
     logger.info("Person detection worker stopped")
@@ -301,10 +343,19 @@ def stats() -> dict:
         return {
             "enabled": PERSON_ENABLED,
             "backend": _backend_status,
+            "resolved_backend": _resolved_backend,
             "requested_backend": PERSON_BACKEND,
             "opencv_available": _CV_OK,
             "frames_seen": _frames_seen,
             "tracked_count": len(_tracks),
             "history_size": len(_history),
             "min_confidence": MIN_CONF,
+            # Phase 6: detection latency visibility (benchmark on the Pi via
+            # these numbers; tune SENTRA_PERSON_HOG_* accordingly).
+            "avg_detect_ms": (round(_detect_ms_ema, 1)
+                              if _detect_ms_ema is not None else None),
+            "last_detect_ms": (round(_last_detect_ms, 1)
+                               if _last_detect_ms is not None else None),
+            "hog_downscale_width": HOG_DOWNSCALE_W,
+            "hog_winstride": HOG_WINSTRIDE,
         }

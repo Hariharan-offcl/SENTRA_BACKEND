@@ -22,6 +22,13 @@ class BaseMotor(ABC):
         """
         pass
 
+    def brake(self, hold_s: float = 0.5) -> None:
+        """Active brake (both L298N terminals shorted), then release to
+        neutral. Default: coast to a stop — physical drivers override with
+        the real short-brake sequence on the SAME pins/handle as set_speed
+        (Phase 2: one chip, one path, no split-brain)."""
+        self.set_speed(0, 0)
+
     @abstractmethod
     def status(self) -> dict:
         """Return current motor state and targets"""

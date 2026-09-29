@@ -30,19 +30,17 @@ def _init_hardware():
                        "simulation mode)")
         return
     try:
-        from services.motor_service import _h as motor_h
-        _h = motor_h
-        
-        if _h is None:
-            logger.error("Motor service did not initialize lgpio chip.")
-            return
-
-        lgpio.gpio_claim_output(_h, FRONT_TRIG, 0)
-        lgpio.gpio_claim_input(_h, FRONT_ECHO)
-        
-        lgpio.gpio_claim_output(_h, REAR_TRIG, 0)
-        lgpio.gpio_claim_input(_h, REAR_ECHO)
-        logger.info("SENTRA ultrasonic hardware initialized on Pi 5 (lgpio)")
+        from hardware.gpio_manager import gpio_manager
+        if not gpio_manager.claim_output(FRONT_TRIG, owner="ultrasonic.service", initial=0):
+            raise RuntimeError(f"pin {FRONT_TRIG} unavailable")
+        if not gpio_manager.claim_input(FRONT_ECHO, owner="ultrasonic.service"):
+            raise RuntimeError(f"pin {FRONT_ECHO} unavailable")
+        if not gpio_manager.claim_output(REAR_TRIG, owner="ultrasonic.service", initial=0):
+            raise RuntimeError(f"pin {REAR_TRIG} unavailable")
+        if not gpio_manager.claim_input(REAR_ECHO, owner="ultrasonic.service"):
+            raise RuntimeError(f"pin {REAR_ECHO} unavailable")
+        _h = gpio_manager.chip
+        logger.info("SENTRA ultrasonic pins claimed on the shared GPIO handle")
     except Exception as e:
         logger.error(f"Failed to init ultrasonic lgpio: {e}")
         _h = None

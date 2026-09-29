@@ -9,6 +9,7 @@ class SimulatedMotor(BaseMotor):
         self.left_speed = 0.0
         self.right_speed = 0.0
         self.initialized = False
+        self.brake_holds = 0  # brake() call counter (test/introspection hook)
 
     def initialize(self):
         self.initialized = True
@@ -25,6 +26,12 @@ class SimulatedMotor(BaseMotor):
         self.right_speed = right
         # In a real sim, this would update a physics model
         # logger.debug(f"SimMotor speed: L={left:.2f} R={right:.2f}")
+
+    def brake(self, hold_s: float = 0.0) -> None:
+        """Simulated brake: records the hold and zeros the wheels. The real
+        hold sleep happens only on hardware (dev/tests must not stall)."""
+        self.brake_holds += 1
+        self.set_speed(0, 0)
 
     def status(self) -> dict:
         return {

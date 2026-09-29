@@ -52,6 +52,17 @@ def run_checks() -> list[dict]:
                       "are unauthenticated",
         })
 
+    # Phase 4: open-password mode is now opt-in — flag it when active.
+    from core.auth import APP_PASSWORD
+    if not APP_PASSWORD:
+        findings.append({
+            "id": "NO_PASSWORD_CHECK",
+            "severity": "WARNING",
+            "detail": "SENTRA_PASSWORD is not set — any password logs in "
+                      "(single-trust appliance mode). Set SENTRA_PASSWORD "
+                      "to require it at login.",
+        })
+
     relay_url = os.getenv("SENTRA_RELAY_URL", "").strip()
     if relay_url:
         if os.getenv("SENTRA_RELAY_UNIT_SECRET", DEFAULT_RELAY_SECRET) == DEFAULT_RELAY_SECRET:

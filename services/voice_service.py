@@ -28,7 +28,8 @@ from services import tag_map
 
 logger = logging.getLogger(__name__)
 
-COMMANDS = ("go_to", "go_to_dock", "start_patrol", "stop", "call_user")
+COMMANDS = ("go_to", "go_to_dock", "start_patrol", "pause_patrol",
+            "resume_patrol", "stop", "call_user")
 
 # Free-text keywords → structured commands (matched after 'sentra' wake word)
 _KEYWORDS = [
@@ -142,6 +143,24 @@ def _dispatch_start_patrol() -> dict:
     return out
 
 
+def _dispatch_pause_patrol() -> dict:
+    """Phase 5 (P10): real pause — session kept, motors stopped."""
+    from services import patrol_service
+    result = patrol_service.pause_patrol()
+    if not result.get("ok"):
+        return {"handled": False, "error": result.get("error", "not_pausing")}
+    return {"handled": True, "action": "pause_patrol", "state": "PAUSED"}
+
+
+def _dispatch_resume_patrol() -> dict:
+    """Phase 5 (P10): resume the paused waypoint."""
+    from services import patrol_service
+    result = patrol_service.resume_patrol()
+    if not result.get("ok"):
+        return {"handled": False, "error": result.get("error", "not_resuming")}
+    return {"handled": True, "action": "resume_patrol", "state": "PATROL"}
+
+
 def _dispatch_stop() -> dict:
     from services import patrol_service, docking_service, navigation_service
     patrol_service.stop_patrol()
@@ -164,11 +183,34 @@ def _dispatch_call_user(target: Optional[str]) -> dict:
 
 # ── Entry point ──────────────────────────────────────────────────────────────
 
+# Phase 1 contract: the Flutter parser (voice_command_parser.dart) emits these
+# SHOUTED enums with a `location` key. The last three are handled by the WS
+# layer itself (estop / call creation / telemetry re-push), so they never
+# reach the dispatchers below.
+ALIASES = {
+    "GO_TO": "go_to",
+    "START_PATROL": "start_patrol",
+    "PAUSE_PATROL": "pause_patrol",   # Phase 5: real pause state
+    "RESUME_PATROL": "resume_patrol",  # Phase 5: resumes the paused waypoint
+    "STOP_PATROL": "stop",
+    "STANDBY": "go_to_dock",          # return to dock and stand by
+    "STOP": "stop",
+}
+
+
 def execute(command: str, target: Optional[str] = None,
-            raw: Optional[str] = None) -> dict:
-    """Execute a structured voice command. Never raises."""
+            raw: Optional[str] = None, location: Optional[str] = None) -> dict:
+    """Execute a structured voice command. Never raises.
+
+    Accepts the legacy lowercase vocabulary AND the Flutter SHOUTED enums
+    (SENTRA_API_CONTRACT.md §5). `location` and `target` are interchangeable.
+    """
     started = time.time()
     try:
+        # Flutter vocabulary bridge (flat key `location` from the app)
+        target = target or location
+        command = ALIASES.get(str(command).strip(), command)
+
         # Convenience: raw text → structured
         if not command and raw:
             parsed = parse_raw(raw)
@@ -192,6 +234,10 @@ def execute(command: str, target: Optional[str] = None,
             result = _dispatch_go_to_dock()
         elif command == "start_patrol":
             result = _dispatch_start_patrol()
+        elif command == "pause_patrol":
+            result = _dispatch_pause_patrol()
+        elif command == "resume_patrol":
+            result = _dispatch_resume_patrol()
         elif command == "stop":
             result = _dispatch_stop()
         elif command == "call_user":

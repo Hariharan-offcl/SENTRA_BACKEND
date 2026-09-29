@@ -50,6 +50,18 @@ def patrol_stop():
     return PatrolStopResponse(**patrol_service.stop_patrol())
 
 
+@router.post("/pause")
+def patrol_pause():
+    """Phase 5 (P10): real pause — session kept, motors stopped."""
+    return patrol_service.pause_patrol()
+
+
+@router.post("/resume")
+def patrol_resume():
+    """Phase 5 (P10): resume from the paused waypoint."""
+    return patrol_service.resume_patrol()
+
+
 @router.get("/status", response_model=PatrolStatusResponse)
 def patrol_status():
     return PatrolStatusResponse(**patrol_service.status())

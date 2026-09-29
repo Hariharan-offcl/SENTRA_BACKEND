@@ -14,8 +14,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 
+from core import config as core_config
 from hardware.manager import hardware_manager
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,23 @@ _state = {
 }
 _stop_event = threading.Event()
 _thread: threading.Thread | None = None
+
+
+def _init_bus() -> Optional[Any]:
+    """Return the I2C bus handle, or None when it must not be touched.
+
+    Simulation mode (Phase 18) always refuses. On a dev machine without
+    smbus2/working I2C this stays None and the service keeps simulating.
+    """
+    if core_config.SIMULATION:
+        return None
+    try:
+        from hardware.bus_manager import bus_manager
+        return bus_manager.bus
+    except Exception as exc:
+        logger.debug("IMU I2C bus unavailable (%s)", exc)
+        return None
+
 
 def _poll_loop() -> None:
     """

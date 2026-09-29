@@ -86,8 +86,10 @@ dets = pd.get_detections(5)
 check("history newest first", len(dets) <= 5)
 st = pd.stats()
 check("stats shape", {"enabled", "backend", "frames_seen", "tracked_count"} <= set(st.keys()), str(st))
-check("backend becomes 'simulation' after worker runs (lazily set)",
-      st["backend"] in ("simulation", "unavailable"), str(st))
+# Phase 6: backend default is 'auto' → hog whenever OpenCV imports (real
+# detection), simulation as fallback. 'failed' also possible after a bad frame.
+check("backend resolves (auto → hog/simulation)",
+      st["backend"] in ("simulation", "hog", "unavailable", "failed"), str(st))
 
 print("\n[4] HOG backend smoke test (real CV pipeline)")
 if pd._CV_OK:

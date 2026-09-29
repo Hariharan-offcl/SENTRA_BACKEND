@@ -50,17 +50,53 @@ async def send_event(ws: WebSocket, event: str, data: dict) -> None:
     await ws.send_text(json.dumps({"event": event, "data": data}))
 
 
-def push_event(event: str, data: dict) -> None:
-    """Thread-safe push of one event to every connected app client."""
-    import asyncio as _aio
-    loop = _aio.get_event_loop()
+# Direct-push registry for the multiplexed /ws socket itself (the phase-21
+# test also injects fake clients here). push_event fans out to BOTH this set
+# and any legacy role-USER sockets, without duplicating a client.
+_clients: set = set()
 
-    # Only push to USER roles for the app compat socket
-    users = connection_manager.get_connections_by_role("USER")
-    for ws in list(users):
+
+# Event loop captured from whichever context first runs push_event, so sync
+# endpoints (no running loop in their thread) can still schedule pushes.
+# The phase-21 test also assigns this directly.
+_alert_loop = None
+
+
+def push_event(event: str, data: dict) -> None:
+    """Thread-safe push of one event to every connected app client.
+
+    May be called from a sync endpoint (no running loop in this thread —
+    Phase 0 fix: that used to raise inside asyncio.get_event_loop() and
+    turn the whole request into a 500) or from a background thread. When no
+    loop is known yet, remember one for later pushes.
+    """
+    import asyncio as _aio
+    global _alert_loop
+    try:
+        loop = _aio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None:
+        loop = _alert_loop
+    elif _alert_loop is not loop:
+        _alert_loop = loop
+    if loop is None or loop.is_closed():
+        return  # nothing we can schedule onto yet
+
+    payload = json.dumps({"event": event, "data": data})
+
+    async def _send_raw(_ws, _payload: str) -> None:
+        await _ws.send_text(_payload)
+
+    # Multiplexed /ws clients first, then any legacy role-USER sockets
+    # (skipping duplicates already in _clients).
+    targets = list(_clients)
+    for ws in connection_manager.get_connections_by_role("USER"):
+        if ws not in _clients:
+            targets.append(ws)
+    for ws in targets:
         try:
-            _aio.run_coroutine_threadsafe(
-                send_event(ws, event, data), loop)
+            _aio.run_coroutine_threadsafe(_send_raw(ws, payload), loop)
         except RuntimeError:
             pass  # loop shutting down
 
@@ -211,6 +247,7 @@ async def compat_ws_endpoint(websocket: WebSocket):
                                     permissions=[], kind="user", jti="-")
 
     await connection_manager.connect(websocket, role="USER", user_id=ctx.device_id)
+    _clients.add(websocket)
     logger.info("App compat WS connected (%s) total=%d",
                 ctx.device_id, len(connection_manager.active_connections))
 
@@ -223,6 +260,7 @@ async def compat_ws_endpoint(websocket: WebSocket):
         logger.error("compat WS error: %s", exc)
     finally:
         pusher.cancel()
+        _clients.discard(websocket)
         connection_manager.disconnect(websocket)
         # Safety: this client may have been driving.
         from services.motion_controller import get_motion_controller

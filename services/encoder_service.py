@@ -88,20 +88,18 @@ def _init_hardware() -> None:
             ENCODER_LEFT_GPIO, ENCODER_RIGHT_GPIO)
         return
     try:
-        from services.motor_service import _h as motor_h
-        if motor_h is not None:
-            _h = motor_h
-            _h_owned = False
-        else:
-            _h = lgpio.gpiochip_open(4)
-            _h_owned = True
-        lgpio.gpio_claim_input(_h, ENCODER_LEFT_GPIO)
-        lgpio.gpio_claim_input(_h, ENCODER_RIGHT_GPIO)
+        from hardware.gpio_manager import gpio_manager
         global _cb_left, _cb_right
+        if not gpio_manager.claim_input(ENCODER_LEFT_GPIO, owner="encoder.service"):
+            raise RuntimeError(f"pin {ENCODER_LEFT_GPIO} unavailable")
+        if not gpio_manager.claim_input(ENCODER_RIGHT_GPIO, owner="encoder.service"):
+            raise RuntimeError(f"pin {ENCODER_RIGHT_GPIO} unavailable")
+        _h = gpio_manager.chip
+        _h_owned = False
         _cb_left = lgpio.callback(_h, ENCODER_LEFT_GPIO, lgpio.BOTH_EDGES, _on_left_tick)
         _cb_right = lgpio.callback(_h, ENCODER_RIGHT_GPIO, lgpio.BOTH_EDGES, _on_right_tick)
         _simulated = False
-        logger.info("Wheel encoders on GPIO %d/%d (%d ticks/rev, %.1f cm wheel)",
+        logger.info("Wheel encoders on GPIO %d/%d (%d ticks/rev, %.1f cm wheel, shared handle)",
                     ENCODER_LEFT_GPIO, ENCODER_RIGHT_GPIO, TICKS_PER_REV, WHEEL_DIAM_M * 100)
     except Exception as exc:
         logger.warning("Encoder hardware init failed — simulated (%s)", exc)

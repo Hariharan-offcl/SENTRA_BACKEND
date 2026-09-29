@@ -1,6 +1,11 @@
 from typing import Optional
 import logging
-import smbus2
+
+try:
+    import smbus2
+    _SMBUS_AVAILABLE = True
+except ImportError:
+    _SMBUS_AVAILABLE = False
 
 logger = logging.getLogger("sentra.hardware.bus")
 
@@ -13,6 +18,10 @@ class BusManager:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            if not _SMBUS_AVAILABLE:
+                logger.warning("BusManager: smbus2 not available (dev machine?) — bus handle stays None")
+                cls._instance.bus = None
+                return cls._instance
             try:
                 # I2C Bus 1 is standard on Raspberry Pi
                 cls._instance.bus = smbus2.SMBus(1)

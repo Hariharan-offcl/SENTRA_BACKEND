@@ -39,11 +39,16 @@ class PersonStatsResponse(BaseModel):
     enabled: bool
     backend: str
     requested_backend: str
+    resolved_backend: str = "unavailable"
     opencv_available: bool
     frames_seen: int
     tracked_count: int
     history_size: int
     min_confidence: float
+    avg_detect_ms: Optional[float] = None
+    last_detect_ms: Optional[float] = None
+    hog_downscale_width: Optional[int] = None
+    hog_winstride: Optional[int] = None
 
 
 class PersonSimulateRequest(BaseModel):

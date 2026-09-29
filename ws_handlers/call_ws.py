@@ -1,3 +1,10 @@
+import json
+import logging
+import time
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from services import call_service, emergency_call
 from services.connection_manager import connection_manager
 
 router = APIRouter(tags=["WebSocket"])
@@ -9,6 +16,10 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
     cm_role = "ROVER" if role == "node" else "USER"
     if role not in call_service.webrtc_clients:
         await websocket.close(code=1008, reason="role must be 'node' or 'user'")
+        return
+    # Phase 4: token gate (?token=) — 4401 when enforced and missing/bad.
+    from core import auth as core_auth
+    if await core_auth.verify_ws_token(websocket) is None:
         return
 
     await connection_manager.connect(websocket, role=cm_role, user_id=role)
@@ -80,6 +91,10 @@ async def call_socket(websocket: WebSocket, role: str):
     cm_role = "ROVER" if role == "node" else "USER"
     if role not in call_service.call_clients:
         await websocket.close(code=1008, reason="role must be 'node' or 'user'")
+        return
+    # Phase 4: token gate (?token=) — 4401 when enforced and missing/bad.
+    from core import auth as core_auth
+    if await core_auth.verify_ws_token(websocket) is None:
         return
 
     await connection_manager.connect(websocket, role=cm_role, user_id=role)

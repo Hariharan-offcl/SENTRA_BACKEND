@@ -41,10 +41,12 @@ from routers import devices as devices_router
 from routers import relay as relay_router
 from routers import simulation as simulation_router  # Phase 18
 from routers import compat as compat_router  # Phase 21: final app spec aliases
+from routers import route_graph as route_graph_router  # Phase 5: taught route graph
 
 # WebSocket handlers
 from ws_handlers import telemetry_ws, control_ws, alerts_ws, call_ws
 from ws_handlers import compat_ws  # Phase 21: multiplexed app socket
+from ws_handlers import app_ws  # Phase 1 contract: /ws/user + /ws/rover
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -78,6 +80,7 @@ async def lifespan(app: FastAPI):
     hardening.run_checks()
 
     # Start UDP broadcast discovery responder
+    from services.udp_discovery import start_udp_discovery  # Phase 0 fix: import lost
     asyncio.create_task(start_udp_discovery(host_ip))
 
     # ── Phase 2: Centralized Hardware Lifecycle ──────────────────────
@@ -115,7 +118,7 @@ async def lifespan(app: FastAPI):
     safety_events.add_listener(notification_service.notify_safety_event)
 
     # ── Phase 4: Start mapping recording loop ──────────────────────────
-    from services.mapping_service import mapping_service
+    from services import mapping_service
     asyncio.create_task(mapping_service.recording_loop())
 
     # ── Phase 15: device registry + JWT auth enforcement ────────────────
@@ -148,6 +151,8 @@ async def lifespan(app: FastAPI):
 
     # ── Phase 9: navigation (go-to-location) engine ──────────────
     from services import navigation_service
+    from services import route_graph
+    route_graph.load()  # taught route graph (Phase 5: P11)
     navigation_service.start_engine()
 
     # ── Phase 5+6: vision pipeline (phone frames → AprilTag → location/map) ──
@@ -156,6 +161,10 @@ async def lifespan(app: FastAPI):
     vision_service.subscribe(
         lambda frame, frame_id: apriltag_service.process_frame(frame, frame_id),
         name="apriltag")
+    # Phase 0 repair: the old subscription called mapping_service.on_frame
+    # before that method existed. The method now exists on MappingService and
+    # is subscribed again — remove this block only if the mapping feature is
+    # intentionally dropped.
     vision_service.subscribe(mapping_service.on_frame, name="mapping")
 
     # ── Phase 10: person detection (phone frames → tracked persons) ────
@@ -253,11 +262,21 @@ async def _auth_enforcement(request, call_next):
     return await call_next(request)
 
 
-# CORS — allow the Flutter app to reach the Pi from any origin on the LAN
+# CORS — Phase 4 hardening: browsers must not be able to pair a wildcard
+# origin with credentialed requests. The Flutter app (non-web) and LAN tools
+# send no Origin header at all, so the default here does not restrict them;
+# a browser-based client must come from an allowed origin. Add
+# SENTRA_CORS_ORIGINS=https://app.example.com to restrict further.
+import os as _os
+_origins_env = _os.getenv("SENTRA_CORS_ORIGINS", "").strip()
+if _origins_env:
+    _allow_origins = [o.strip() for o in _origins_env.split(",") if o.strip()]
+else:
+    _allow_origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_allow_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -288,6 +307,7 @@ app.include_router(devices_router.router)  # Phase 15: /api/v1/devices/*
 app.include_router(relay_router.router)  # Phase 16: /api/v1/relay/*            # Phase 12: /api/v1/fall/*
 app.include_router(simulation_router.router)  # Phase 18: /api/v1/simulation/*
 app.include_router(compat_router.router)  # Phase 21: /api/* final app spec
+app.include_router(route_graph_router.router)  # Phase 5: /api/v1/nav/graph
 
 # ── Mount WebSocket routers ───────────────────────────────────────────────────
 app.include_router(telemetry_ws.router)
@@ -295,11 +315,19 @@ app.include_router(control_ws.router)
 app.include_router(alerts_ws.router)
 app.include_router(call_ws.router)
 app.include_router(compat_ws.router)  # Phase 21: /ws multiplexed app socket
+app.include_router(app_ws.router)  # Phase 1 contract: /ws/user + /ws/rover
 
 # ── Static file serving (snapshots download) ──────────────────────────────────
 _snapshot_dir = settings.camera_snapshot_dir
 os.makedirs(_snapshot_dir, exist_ok=True)
 app.mount("/snapshots", StaticFiles(directory=_snapshot_dir), name="snapshots")
+
+# ── Phase 3: person-recognition snapshots at /media ─────────────────────────
+# person_object() / alert_object() emit /media/<file> image URLs; until now
+# nothing served that prefix (audit P-bug: image_url 404).
+from services.person_recognition import SNAPSHOT_DIR as _media_dir
+os.makedirs(_media_dir, exist_ok=True)
+app.mount("/media", StaticFiles(directory=_media_dir), name="media")
 
 
 # ── Utility ───────────────────────────────────────────────────────────────────

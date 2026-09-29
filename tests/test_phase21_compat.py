@@ -196,7 +196,9 @@ st, r = call("POST", "/api/robots/sentra-01/patrol/start",
 check("patrol start (or refused if no fresh vision)", st in (200, 409), f"{st} {r}")
 call("POST", "/api/robots/sentra-01/patrol/stop", {}, token=TOKEN)
 st, r = call("POST", "/api/robots/sentra-01/patrol/pause", token=TOKEN)
-check("patrol pause → stop semantics", st == 200 and "stopped" in r, f"{st} {r}")
+# Phase 5: pause is a REAL pause of an active session — with none active it
+# cleanly refuses instead of mapping to stop.
+check("patrol pause without session → 409", st == 409, f"{st} {r}")
 st, r = call("DELETE", "/api/robots/sentra-01/patrol/routes/route-Night Round",
              token=TOKEN)
 check("delete route", st == 200, f"{st} {r}")
@@ -419,7 +421,10 @@ check("compat paths registered", _new <= schema_paths,
       f"missing: {_new - schema_paths}")
 check("internal /api/v1 paths intact",
       "/api/v1/system/status" in schema_paths and "/api/v1/ping" in schema_paths)
-check("path count now 121", len(schema_paths) == 121, str(len(schema_paths)))
+# Phase 1: exact-count snapshots break on every legitimate contract addition,
+# so this is a floor (mass path loss guard). The specific-path subset checks
+# above are the real regression guard.
+check("path count floor 122", len(schema_paths) >= 122, str(len(schema_paths)))
 
 # ── summary ──────────────────────────────────────────────────────────────────
 print(f"\n{'=' * 60}")

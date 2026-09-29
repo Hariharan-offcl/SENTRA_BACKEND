@@ -22,7 +22,10 @@ async def telemetry_ws(websocket: WebSocket):
     10 Hz real-time telemetry stream.
     The Flutter Dashboard connects here immediately after pairing.
     """
-    # Phase 1: Use connection_manager for registration
+    # Phase 4: token gate (?token=) — 4401 when enforced and missing/bad.
+    from core import auth as core_auth
+    if await core_auth.verify_ws_token(websocket) is None:
+        return
     # Defaulting to USER role for telemetry subscribers
     await connection_manager.connect(websocket, role="USER")
     logger.info("Telemetry WS connected")

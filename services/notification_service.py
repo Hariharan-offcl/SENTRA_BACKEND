@@ -163,17 +163,22 @@ def from_safety_event(event: dict) -> dict | None:
     title = _TITLE_BY_EVENT.get(etype, f"Safety: {etype.title()}")
     if severity == "DANGER" and not title.lower().startswith("emergency"):
         title = f"Emergency: {title}"
+    detail = event.get("detail") or {}
+    # Phase 3: keep the snapshot filename (person_recognition saves JPEGs of
+    # unknown-person events) so the alert detail screen can show the image.
+    image_file = detail.get("snapshot") or None
     return {
         "id": _new_id(created),
         "title": title,
         "timestamp": _display_timestamp(created, location),
-        "description": _detail_text(etype, event.get("detail") or {}, severity),
+        "description": _detail_text(etype, detail, severity),
         "severity": severity,
         "acknowledged": False,
         "event_type": etype,
         "location": location,
         "created_at": created,
         "acknowledged_at": None,
+        "image_file": image_file,
     }
 
 

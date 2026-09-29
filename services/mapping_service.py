@@ -1,20 +1,54 @@
+"""
+SENTRA — Manual mapping service (Phase 6, Phase 0 repair).
+
+The user drives the robot in MANUAL mode; AprilTag sightings become named
+locations in the persistent tag map, while a 10 Hz odometry trace is written
+to disk for the session.
+
+Phase 0 repair: this module previously exposed an instance-based API
+(`mapping_service.start_session()` on a MappingService singleton) that matched
+neither its tests, nor the router, nor the pydantic models — and read the
+wrong telemetry battery keys. It is now the module-level API everything else
+already expected:
+
+    start_session(started_by=...)         → {"ok", "session"} / already_active / error
+    stop_session()                        → {"ok"} / already_stopped
+    get_session()                         → session dict or None (active only)
+    capture_tag_detection(det)            → capture dict or None (dedup + TTL)
+    list_captures(named=None)             → [capture dict]
+    get_capture(capture_id)               → capture dict or None
+    name_capture(tag_id, name, type, notes) → {"ok", "tag", "named_from_capture", ...}
+    delete_capture(capture_id)            → bool (named captures protected)
+    update_odometry(d_dist, d_heading)    — integrate dead-reckoning pose
+    on_frame(frame, frame_id)             — vision-hub subscriber (captures tags)
+    recording_loop()                      — async 10 Hz trace writer (lifespan)
+
+Module vars tests/ops may re-point: SNAPSHOT_DIR, CAPTURE_TTL_S.
+"""
+
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import math
 import os
+import threading
 import time
 from collections import deque
-from dataclasses import dataclass, asdict
-from typing import Optional, List, Dict, Any
-from threading import Lock
+from dataclasses import asdict, dataclass
+from typing import Optional
 
 from core import config as core_config
-from core.state import get_robot_state, MANUAL
-from services import sensor_service, tag_map
+from core.state import MANUAL, get_robot_state
 
 logger = logging.getLogger(__name__)
+
+# Mapping session traces (JSONL) are written here. Re-pointable in tests.
+SNAPSHOT_DIR: str = core_config.SENTRA_MAP_SNAPSHOT_DIR
+# Unnamed captures expire after this long without a re-sighting.
+CAPTURE_TTL_S: float = 600.0
+
 
 @dataclass
 class MappingPoint:
@@ -28,136 +62,319 @@ class MappingPoint:
     current_ma: float
     health: str
 
-class MappingService:
-    """
-    Handles the manual mapping sessions where a user drives the robot
-    to teach it locations and record an odometry trace.
-    """
-    def __init__(self):
-        self._lock = Lock()
-        self._active = False
-        self._session_id: Optional[str] = None
-        self._file_handle = None
 
-        # Current local coordinates
-        self._x = 0.0
-        self._y = 0.0
-        self._heading = 0.0
+# ── Session state (module-level, guarded by _lock) ───────────────────────────
+_lock = threading.Lock()
+_session: Optional[dict] = None
+_file_handle = None
 
-        # Buffer for high-frequency recording to avoid blocking on I/O
-        self._buffer = deque(maxlen=100)
-        self._recording_task: Optional[asyncio.Task] = None
+# Dead-reckoning pose relative to the session origin (0, 0, 0)
+_x = 0.0
+_y = 0.0
+_heading = 0.0
 
-    def start_session(self) -> dict:
-        """Starts a mapping session and resets the local origin."""
-        st = get_robot_state()
-        if st.get_mode() != MANUAL:
-            # Auto-request MANUAL mode for mapping
-            result = st.request_mode(MANUAL, requested_by="mapping_service")
-            if not result.get("accepted"):
-                return {"ok": False, "error": "could not enter MANUAL mode"}
+# Freshest tag seen this session (set by on_frame / capture_tag_detection)
+_last_tag_id: Optional[int] = None
+_last_room: Optional[str] = None
 
-        with self._lock:
-            self._active = True
-            self._x = 0.0
-            self._y = 0.0
-            self._heading = 0.0
-            self._session_id = f"session_{int(time.time())}"
+# Small ring buffer kept for future burst writes
+_buffer: deque = deque(maxlen=200)
 
-            # Open JSONL file for appending
-            path = os.path.join(core_config.SENTRA_MAP_SNAPSHOT_DIR, f"{self._session_id}_trace.jsonl")
-            os.makedirs(core_config.SENTRA_MAP_SNAPSHOT_DIR, exist_ok=True)
-            self._file_handle = open(path, "a")
 
-            logger.info("Mapping session started: %s. Origin set to (0,0,0)", self._session_id)
+def _now() -> float:
+    return time.time()
 
-        return {"ok": True, "session_id": self._session_id, "file": path}
 
-    def stop_session(self) -> dict:
-        """Stops recording and closes the file."""
-        with self._lock:
-            if not self._active:
-                return {"ok": False, "error": "no active session"}
+def _session_snapshot(sess: Optional[dict]) -> Optional[dict]:
+    if sess is None:
+        return None
+    return {
+        "id": sess["id"],
+        "active": sess["active"],
+        "started_by": sess["started_by"],
+        "started_at": sess["started_at"],
+        "captures": [dict(c) for c in sess["captures"]],
+        "stopped_at": sess.get("stopped_at"),
+    }
 
-            self._active = False
-            if self._file_handle:
-                self._file_handle.close()
-                self._file_handle = None
 
-            session_id = self._session_id
-            self._session_id = None
-            logger.info("Mapping session %s stopped", session_id)
+# ── Session lifecycle ────────────────────────────────────────────────────────
 
-        return {"ok": True, "session_id": session_id}
+def start_session(started_by: str = "user") -> dict:
+    """Start a mapping session. Adopts MANUAL mode; refuses during e-stop."""
+    global _session, _file_handle, _x, _y, _heading, _last_tag_id, _last_room
 
-    def update_odometry(self, delta_dist: float, delta_heading: float):
-        """
-        Integrates wheel distance and IMU yaw to update local (x, y, theta).
-        Called by the sensor aggregator or a dedicated loop.
-        """
-        with self._lock:
-            if not self._active:
-                return
+    st = get_robot_state()
+    if st.is_estop_active():
+        return {"ok": False, "error": "estop active — reset it before mapping"}
+    if st.get_mode() != MANUAL:
+        result = st.request_mode(MANUAL, requested_by="mapping_service")
+        if not result.get("accepted"):
+            return {"ok": False, "error": "could not enter MANUAL mode"}
 
-            # Simple 2D dead reckoning
-            import math
-            rad = math.radians(self._heading)
-            self._x += delta_dist * math.cos(rad)
-            self._y += delta_dist * math.sin(rad)
-            self._heading = (self._heading + delta_heading) % 360.0
+    with _lock:
+        if _session is not None and _session["active"]:
+            return {"ok": True, "session": _session_snapshot(_session),
+                    "already_active": True}
 
-    async def recording_loop(self):
-        """
-        Background loop that captures 10Hz snapshots and flushes to disk.
-        """
-        while True:
-            if self._active:
-                try:
-                    # Capture snapshot
-                    snap = sensor_service.get_snapshot()
-                    imu = snap.get("imu", {})
-                    enc = snap.get("wheel_encoders", {})
+        try:
+            os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+            sid = f"session_{int(time.time())}"
+            path = os.path.join(SNAPSHOT_DIR, f"{sid}_trace.jsonl")
+            _file_handle = open(path, "a", encoding="utf-8")
+        except OSError as exc:
+            logger.error("Mapping trace file unavailable: %s", exc)
+            return {"ok": False, "error": f"cannot open trace file: {exc}"}
 
-                    # Get current tag/room
-                    # Note: In a real implementation, this would query localization_service
-                    tag_id = None
-                    room_name = "unknown"
-                    # Placeholder: logic to find best tag from sensor_service/apriltag_service
+        _x = 0.0
+        _y = 0.0
+        _heading = 0.0
+        _last_tag_id = None
+        _last_room = None
+        _session = {
+            "id": sid, "active": True, "started_by": started_by,
+            "started_at": _now(), "captures": [], "stopped_at": None,
+        }
+        logger.info("Mapping session %s started by %s (origin 0,0,0)",
+                    sid, started_by)
+        return {"ok": True, "session": _session_snapshot(_session)}
 
-                    # Get battery/current from telemetry
-                    from services.telemetry_service import _sim
-                    battery = _sim.get("battery", {}).get("pct", 0.0)
-                    current = _sim.get("battery", {}).get("current_ma", 0.0)
 
-                    point = MappingPoint(
-                        timestamp=time.time(),
-                        x=self._x,
-                        y=self._y,
-                        heading=self._heading,
-                        tag_id=tag_id,
-                        room_name=room_name,
-                        battery_pct=battery,
-                        current_ma=current,
-                        health="OK" # Simplified
-                    )
+def stop_session() -> dict:
+    """Stop the active session (clears it — get_session() returns None after)."""
+    global _session, _file_handle
+    with _lock:
+        if _session is None or not _session["active"]:
+            return {"ok": True, "already_stopped": True}
+        sid = _session["id"]
+        _session = None
+        if _file_handle:
+            try:
+                _file_handle.close()
+            except Exception:
+                pass
+            _file_handle = None
+        logger.info("Mapping session %s stopped", sid)
+        return {"ok": True}
 
-                    # Append to file
-                    if self._file_handle:
-                        self._file_handle.write(json.dumps(asdict(point)) + "\n")
-                        # Flush occasionally or use a buffer. For JSONL, write is usually fast.
-                except Exception as e:
-                    logger.error("Mapping record error: %s", e)
 
-            await asyncio.sleep(0.1) # 10 Hz
+def get_session() -> Optional[dict]:
+    """Snapshot of the active session, or None."""
+    with _lock:
+        return _session_snapshot(_session)
 
-    def get_current_position(self) -> dict:
-        with self._lock:
-            return {
-                "x": self._x,
-                "y": self._y,
-                "heading": self._heading,
-                "active": self._active
-            }
 
-# Singleton instance
-mapping_service = MappingService()
+# ── Captures ─────────────────────────────────────────────────────────────────
+
+def _detection_model(det: dict) -> dict:
+    return {
+        "distance_m": det.get("distance_m"),
+        "bearing_deg": det.get("bearing_deg"),
+        "confidence": det.get("confidence"),
+        "source": det.get("source", "phone"),
+    }
+
+
+def _context_model() -> dict:
+    try:
+        from services import sensor_service
+        snap = sensor_service.get_snapshot()
+    except Exception:
+        snap = {}
+    ultra = snap.get("ultrasonic", {}) or {}
+    return {
+        "imu": snap.get("imu", {}) or {},
+        "wheel_encoders": snap.get("wheel_encoders", {}) or {},
+        "front_distance_m": ultra.get("front_distance_m"),
+        "rear_distance_m": ultra.get("rear_distance_m"),
+    }
+
+
+def _purge_expired_locked(now: float) -> None:
+    """Drop unnamed captures past their TTL. Caller holds _lock."""
+    if _session is None:
+        return
+    _session["captures"] = [
+        c for c in _session["captures"]
+        if c["named"] or now - c["last_seen_at"] <= CAPTURE_TTL_S
+    ]
+
+
+def capture_tag_detection(det: dict) -> Optional[dict]:
+    """Record one AprilTag sighting as a capture (deduped while unnamed)."""
+    tag_id = det.get("tag_id")
+    if tag_id is None:
+        return None
+    now = _now()
+    with _lock:
+        if _session is None or not _session["active"]:
+            return None
+        _purge_expired_locked(now)
+        for cap in _session["captures"]:
+            if cap["tag_id"] == int(tag_id) and not cap["named"]:
+                cap["seen_count"] += 1
+                cap["last_seen_at"] = now
+                cap["detection"] = _detection_model(det)
+                return dict(cap)
+        cap = {
+            "capture_id": f"cap-{int(now * 1000):x}-{len(_session['captures']) + 1}",
+            "tag_id": int(tag_id),
+            "named": False,
+            "name": None,
+            "seen_count": 1,
+            "first_seen_at": now,
+            "last_seen_at": now,
+            "detection": _detection_model(det),
+            "context": _context_model(),
+            "frame_path": None,
+        }
+        _session["captures"].append(cap)
+        return dict(cap)
+
+
+def list_captures(named: Optional[bool] = None) -> list[dict]:
+    """Captures of the active session (expired unnamed ones purged)."""
+    with _lock:
+        if _session is None:
+            return []
+        _purge_expired_locked(_now())
+        caps = [dict(c) for c in _session["captures"]]
+    if named is not None:
+        caps = [c for c in caps if c["named"] == named]
+    return caps
+
+
+def get_capture(capture_id: str) -> Optional[dict]:
+    with _lock:
+        if _session is None:
+            return None
+        for c in _session["captures"]:
+            if c["capture_id"] == capture_id:
+                return dict(c)
+    return None
+
+
+def name_capture(tag_id: int, name: str, type: str = "LOCATION",
+                 notes: str = "") -> dict:
+    """Name a tag (binding it to a pending capture when one exists)."""
+    from services import tag_map
+    try:
+        tag = tag_map.upsert_tag(tag_id, name, type, notes)
+    except ValueError as exc:
+        return {"ok": False, "tag": {}, "error": str(exc)}
+    with _lock:
+        if _session is not None:
+            _purge_expired_locked(_now())
+            for c in _session["captures"]:
+                if c["tag_id"] == int(tag_id) and not c["named"]:
+                    c["named"] = True
+                    c["name"] = name.strip()
+                    return {"ok": True, "tag": tag,
+                            "named_from_capture": True,
+                            "capture_id": c["capture_id"]}
+    return {"ok": True, "tag": tag, "named_from_capture": False,
+            "capture_id": None}
+
+
+def delete_capture(capture_id: str) -> bool:
+    """Discard an unnamed capture; named captures are protected."""
+    with _lock:
+        if _session is None:
+            return False
+        for i, c in enumerate(_session["captures"]):
+            if c["capture_id"] == capture_id:
+                if c["named"]:
+                    return False
+                del _session["captures"][i]
+                return True
+    return False
+
+
+# ── Odometry + vision correlation ────────────────────────────────────────────
+
+def update_odometry(delta_dist: float, delta_heading: float) -> None:
+    """Integrate wheel distance and IMU yaw into the session pose."""
+    global _x, _y, _heading
+    with _lock:
+        if _session is None or not _session["active"]:
+            return
+        rad = math.radians(_heading)
+        _x += delta_dist * math.cos(rad)
+        _y += delta_dist * math.sin(rad)
+        _heading = (_heading + delta_heading) % 360.0
+
+
+def on_frame(frame, frame_id: str = "") -> None:
+    """Vision-hub subscriber (wired in main.py): turn fresh AprilTag
+    detections into captures while a session is active. Non-throwing — a bad
+    frame must never take down the vision pipeline."""
+    try:
+        from services import apriltag_service, tag_map
+        dets = apriltag_service.get_detections_for_frame(frame_id)
+        if not dets:
+            return
+        best = max(dets, key=lambda d: d.get("confidence") or 0)
+        tag_id = best.get("tag_id")
+        if tag_id is None:
+            return
+        capture_tag_detection({
+            "tag_id": tag_id,
+            "distance_m": best.get("distance_m"),
+            "bearing_deg": best.get("bearing_deg"),
+            "confidence": best.get("confidence"),
+            "source": best.get("source", "phone"),
+        })
+        tag = tag_map.get_tag(int(tag_id))
+        global _last_tag_id, _last_room
+        with _lock:
+            _last_tag_id = int(tag_id)
+            _last_room = (tag or {}).get("name")
+    except Exception as exc:  # never break the vision pipeline
+        logger.debug("mapping on_frame error: %s", exc)
+
+
+# ── Trace recording (async, started from lifespan) ───────────────────────────
+
+def _telemetry() -> tuple[float, float, str]:
+    """(battery_pct, current_ma, health) — _sim uses flat top-level keys."""
+    try:
+        from services.telemetry_service import _sim
+        battery = float(_sim.get("battery_level", 0.0))
+        current = float(_sim.get("current_ma", 0.0))
+        return battery, current, "LOW_BATTERY" if battery < 20 else "OK"
+    except Exception:
+        return 0.0, 0.0, "UNKNOWN"
+
+
+async def recording_loop() -> None:
+    """Background loop capturing 10 Hz trace points while a session is active."""
+    while True:
+        try:
+            with _lock:
+                active = _session is not None and _session["active"]
+                fh = _file_handle
+                x, y, heading = _x, _y, _heading
+                tag_id, room = _last_tag_id, _last_room
+            if active and fh is not None:
+                battery, current, health = _telemetry()
+                point = MappingPoint(
+                    timestamp=_now(), x=x, y=y, heading=heading,
+                    tag_id=tag_id, room_name=room or "unknown",
+                    battery_pct=battery, current_ma=current, health=health,
+                )
+                fh.write(json.dumps(asdict(point)) + "\n")
+                fh.flush()
+        except Exception as exc:
+            logger.error("Mapping record error: %s", exc)
+        await asyncio.sleep(0.1)  # 10 Hz
+
+
+def get_current_position() -> dict:
+    """Current relative pose (+ whether a session is active)."""
+    with _lock:
+        return {
+            "x": _x,
+            "y": _y,
+            "heading": _heading,
+            "active": _session is not None and _session["active"],
+        }

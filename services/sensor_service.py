@@ -59,34 +59,42 @@ def _health_of(*, enabled: bool, simulated: bool, last_read: float | None) -> di
 
 
 def _build_once() -> None:
-    from hardware.manager import hardware_manager
+    """Assemble the unified snapshot from the per-sensor services (their
+    daemon threads own the hardware reads; this aggregator never blocks).
+    Distances come from the telemetry ultrasonic state, which the HAL path
+    keeps updated when real hardware is present."""
+    from services import cliff_service, encoder_service, imu_service
+    from services.telemetry_service import _sim
 
-    # Pull directly from HAL
-    ultra_front = hardware_manager.ultrasonic_front.read_distance()
-    ultra_rear = hardware_manager.ultrasonic_rear.read_distance()
-    cliff_state = hardware_manager.cliff.read()
-    imu_state = hardware_manager.imu.get_data()
-    enc_state = hardware_manager.encoder.get_distance()
+    ultra = _sim.get("ultrasonic", {})
+    ultra_last = ultra.get("last_read", 0.0)
+
+    cliff_frag = cliff_service.sensor_provider()
+    enc_frag = encoder_service.sensor_provider()
+    imu_frag = imu_service.sensor_provider()
 
     snap = {
-        "front_distance_m": ultra_front,
-        "rear_distance_m": ultra_rear,
-        "left_cliff": bool(cliff_state["left"]),
-        "right_cliff": bool(cliff_state["right"]),
-        "imu": imu_state,
-        "wheel_encoders": enc_state,
+        "front_distance_m": ultra.get("front_distance_m"),
+        "rear_distance_m": ultra.get("rear_distance_m"),
+        "left_cliff": bool(cliff_frag["left_cliff"]),
+        "right_cliff": bool(cliff_frag["right_cliff"]),
+        "imu": imu_frag["imu"],
+        "wheel_encoders": enc_frag["wheel_encoders"],
         "timestamp": time.time(),
     }
 
     health = {
-        "ultrasonic": _health_of(enabled=True, simulated=hardware_manager.ultrasonic_front.status()["mode"] == "simulated",
-                                 last_read=time.time()),
-        "cliff": _health_of(enabled=True, simulated=hardware_manager.cliff.status()["mode"] == "simulated",
-                            last_read=time.time()),
-        "imu": _health_of(enabled=True, simulated=hardware_manager.imu.status()["mode"] == "simulated",
-                          last_read=time.time()),
-        "wheel_encoders": _health_of(enabled=True, simulated=hardware_manager.encoder.status()["mode"] == "simulated",
-                                     last_read=time.time()),
+        "ultrasonic": _health_of(enabled=True, simulated=ultra_last == 0.0,
+                                 last_read=ultra_last or None),
+        "cliff": _health_of(enabled=bool(cliff_frag.get("cliff_enabled", True)),
+                            simulated=bool(cliff_frag.get("cliff_simulated", True)),
+                            last_read=cliff_frag.get("cliff_last_read")),
+        "imu": _health_of(enabled=bool(imu_frag.get("imu_enabled", True)),
+                          simulated=bool(imu_frag.get("imu_simulated", True)),
+                          last_read=imu_frag.get("imu_last_read")),
+        "wheel_encoders": _health_of(enabled=bool(enc_frag.get("encoders_enabled", True)),
+                                     simulated=bool(enc_frag.get("encoders_simulated", True)),
+                                     last_read=enc_frag.get("encoders_last_read")),
     }
 
     with _lock:

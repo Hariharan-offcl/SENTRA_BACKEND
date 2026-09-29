@@ -67,6 +67,11 @@ PATROL_CONFIRM_FRESH_S: float = 3.0
 PATROL_ROUTES_PATH: str = os.path.expanduser(
     os.getenv("SENTRA_PATROL_ROUTES_PATH", "~/sentra_data/patrol_routes.json"))
 
+# ── Mapping (Phase 6) ─────────────────────────────────────────────────────
+# Mapping session traces (JSONL) are written here.
+SENTRA_MAP_SNAPSHOT_DIR: str = os.path.expanduser(
+    os.getenv("SENTRA_MAP_SNAPSHOT_DIR", "~/sentra_data/maps"))
+
 # ── Return-to-dock (Phase 8) ──────────────────────────────────────────────
 DOCK_SEARCH_TURN_DUTY: float = float(os.getenv("SENTRA_DOCK_SEARCH_DUTY", "30"))
 DOCK_SEARCH_TIMEOUT_S: float = float(os.getenv("SENTRA_DOCK_SEARCH_TIMEOUT_S", "25"))

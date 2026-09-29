@@ -2,8 +2,14 @@ import logging
 import time
 import json
 import os
-import smbus2
 from typing import Optional
+
+try:
+    import smbus2
+    _SMBUS_AVAILABLE = True
+except ImportError:
+    _SMBUS_AVAILABLE = False
+
 from .base import BaseIMU
 from hardware.bus_manager import bus_manager
 
@@ -26,6 +32,8 @@ class PhysicalIMU(BaseIMU):
 
     def initialize(self):
         try:
+            if not _SMBUS_AVAILABLE:
+                raise RuntimeError("smbus2 not available (dev machine?)")
             bus = bus_manager.bus
             if bus is None:
                 raise RuntimeError("I2C bus not available")

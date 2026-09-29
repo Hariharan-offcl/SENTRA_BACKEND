@@ -31,6 +31,10 @@ async def alerts_ws(websocket: WebSocket):
     """
     Persistent push channel — the app listens here for live safety alerts.
     """
+    # Phase 4: token gate (?token=) — 4401 when enforced and missing/bad.
+    from core import auth as core_auth
+    if await core_auth.verify_ws_token(websocket) is None:
+        return
     await connection_manager.connect(websocket, role="USER")
     logger.info("Alerts WS connected")
 

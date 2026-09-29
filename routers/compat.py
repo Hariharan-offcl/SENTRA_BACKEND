@@ -31,6 +31,7 @@ Standard envelopes: success → {"data": ...}; error → {"detail": "..."}.
 """
 
 import logging
+import secrets
 import time
 
 from fastapi import APIRouter, HTTPException, Request
@@ -42,6 +43,8 @@ from services import compat_map as cm
 
 router = APIRouter(prefix="/api", tags=["App Compat"])
 logger = logging.getLogger(__name__)
+
+_START_TIME = time.time()  # for /api/health uptime
 
 
 def _ok(data, status_code: int = 200):
@@ -62,6 +65,9 @@ def auth_login(body: dict):
     username = str((body or {}).get("username", "")).strip()
     if not username:
         raise HTTPException(status_code=400, detail="username is required")
+    # Phase 4: password enforced only when SENTRA_PASSWORD is configured.
+    if not core_auth.check_password((body or {}).get("password")):
+        raise HTTPException(status_code=401, detail="invalid credentials")
     app_role = "user" if str((body or {}).get("role", "admin")).lower() == "user" else "admin"
     internal_role = cm.APP_ROLE_TO_INTERNAL[app_role]
     try:
@@ -94,6 +100,9 @@ def auth_rover_pair(body: dict):
     robot_id = str(body.get("robot_id", "")).strip() or cm.ROBOT_ID
     if not device_id:
         raise HTTPException(status_code=400, detail="device_id is required")
+    # Phase 4: the pairing code must match what the Pi displays.
+    if not core_auth.check_pairing_code(body.get("pairing_code")):
+        raise HTTPException(status_code=403, detail="invalid pairing code")
     # Register as node BEFORE issuing so the JWT carries kind=node.
     device_registry.upsert_device(device_id, kind="node", name="rover phone")
     try:
@@ -141,6 +150,80 @@ def auth_logout(request: Request):
         except Exception:
             pass
     return _ok({})
+
+
+# ── 1. Health (discovery probe — unauthenticated) ────────────────────────────
+
+@router.get("/health")
+def health():
+    """SENTRA_API_CONTRACT.md §0: first contact for BackendConfig.discover()."""
+    import platform
+    return _ok({
+        "status": "ok",
+        "robot_id": cm.ROBOT_ID,
+        "unit_name": __import__("config").settings.unit_name,
+        "mode": cm.app_mode(),
+        "version": __import__("config").settings.api_version,
+        "uptime_s": round(time.time() - _START_TIME, 1),
+        "python": platform.python_version(),
+    })
+
+
+# Pairing tokens (Phase 1 contract): short-lived 6-digit codes the Pi
+# displays; exchanged at /api/auth/rover/register for a device credential.
+_pairing_tokens: dict[str, dict] = {}
+
+
+@router.post("/auth/rover/register")
+def auth_rover_register(body: dict):
+    """Phase 1 contract: exchange a pairing token for a long-lived device
+    credential. Shape mirrors /api/auth/rover/pair on success."""
+    body = body or {}
+    device_id = str(body.get("device_id", "")).strip()
+    pairing_token = str(body.get("pairing_token", "")).strip()
+    robot_id = str(body.get("robot_id", "")).strip() or cm.ROBOT_ID
+    if not device_id or not pairing_token:
+        raise HTTPException(status_code=400,
+                            detail="device_id and pairing_token are required")
+    entry = _pairing_tokens.get(pairing_token)
+    if entry is None or entry["expires_at"] < time.time():
+        _pairing_tokens.pop(pairing_token, None)
+        raise HTTPException(status_code=404, detail="unknown or expired pairing token")
+    if entry["robot_id"] != robot_id:
+        raise HTTPException(status_code=403, detail="pairing token is for a different robot")
+    # Phase 4: the pairing code must also match (defence in depth — the
+    # 6-digit token alone is a small keyspace).
+    if not core_auth.check_pairing_code(body.get("pairing_code")):
+        raise HTTPException(status_code=403, detail="invalid pairing code")
+    _pairing_tokens.pop(pairing_token, None)  # single use
+    device_registry.upsert_device(device_id, kind="node", name="rover phone")
+    try:
+        session = core_auth.issue_session(device_id, "GUARD")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    user = cm.user_object(device_id, "rover", robot_id=robot_id)
+    return _ok({
+        "token": session["token"],
+        "refresh_token": session.get("refresh_token", ""),
+        "user": user,
+        "data": {"token": session["token"], "user": user},  # dual-shape, see login
+    })
+
+
+@router.get("/robots/{robot_id}/pairing-token")
+def get_pairing_token(robot_id: str):
+    """Phase 1 contract: the 6-digit code currently displayed on the Pi
+    (5-minute TTL; a fresh one is issued when expired)."""
+    if robot_id != cm.ROBOT_ID:
+        raise HTTPException(status_code=404, detail="unknown robot_id")
+    now = time.time()
+    token = next((t for t, e in _pairing_tokens.items()
+                  if e["robot_id"] == robot_id and e["expires_at"] > now), None)
+    if token is None:
+        token = f"{secrets.randbelow(1000000):06d}"
+        _pairing_tokens[token] = {"robot_id": robot_id, "expires_at": now + 300.0}
+    return _ok({"token": token, "expires_at": _pairing_tokens[token]["expires_at"],
+                "robot_id": robot_id})
 
 
 # ── 3. Robots ─────────────────────────────────────────────────────────────────
@@ -247,6 +330,29 @@ def control_estop(robot_id: str):
     return _ok(result)
 
 
+@router.get("/robots/{robot_id}/sensors")
+def robot_sensors(robot_id: str):
+    """Phase 1 contract: REST mirror of the sensor_update WS event
+    (used by the dashboard when the socket is reconnecting)."""
+    if robot_id != cm.ROBOT_ID:
+        raise HTTPException(status_code=404, detail="unknown robot_id")
+    return _ok(cm.sensor_event())
+
+
+@router.get("/robots/{robot_id}/status")
+def robot_status(robot_id: str):
+    """Phase 1 contract: everything the dashboard needs in one GET when the
+    WS is down — robot object + navigation status + telemetry block."""
+    if robot_id != cm.ROBOT_ID:
+        raise HTTPException(status_code=404, detail="unknown robot_id")
+    return _ok({
+        **cm.robot_object(),
+        "mode": cm.app_mode(),
+        "navigation": cm.navigation_event(),
+        "telemetry": cm.telemetry_event(),
+    })
+
+
 # ── 7. Locations (tag map) ────────────────────────────────────────────────────
 
 @router.get("/robots/{robot_id}/locations")
@@ -268,7 +374,8 @@ def create_location(robot_id: str, body: dict):
     return _ok(cm.location_object(tag), status_code=201)
 
 
-@router.put("/robots/{robot_id}/locations/{location_id}")
+@router.api_route("/robots/{robot_id}/locations/{location_id}",
+                  methods=["PUT", "PATCH"])  # Phase 1: Flutter PATCHes this
 def update_location(robot_id: str, location_id: str, body: dict):
     from services import tag_map
     if not location_id.startswith("loc-"):
@@ -325,6 +432,19 @@ def navigate_go_to(robot_id: str, body: dict):
     if not result.get("ok"):
         raise HTTPException(status_code=409, detail=result.get("error", "refused"))
     return _ok({"started": True, "target": tag["name"]})
+
+
+@router.post("/robots/{robot_id}/standby")
+def robot_standby(robot_id: str):
+    """Phase 1 contract (app spec §6e): the Pi performs the return-to-dock
+    navigation itself and stands by."""
+    if robot_id != cm.ROBOT_ID:
+        raise HTTPException(status_code=404, detail="unknown robot_id")
+    from services import docking_service
+    result = docking_service.start_return(docked_by="app_standby")
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("error", "refused"))
+    return _ok({"started": True, "mode": "docking"})
 
 
 # ── 8. Patrol routes ──────────────────────────────────────────────────────────
@@ -392,12 +512,23 @@ def patrol_start(robot_id: str, body: dict):
 
 @router.post("/robots/{robot_id}/patrol/pause")
 def patrol_pause(robot_id: str):
-    """App spec §8e — no native pause exists; implemented as stop (safety
-    first: the rover ends its waypoint cleanly rather than freezing mid-step)."""
+    """Phase 5 (P10): real pause — the session and waypoint index are kept,
+    motors stop, mode stays patrol."""
     from services import patrol_service
-    result = patrol_service.stop_patrol()
-    return _ok({"paused": False, "stopped": bool(result.get("ok")),
-                "note": "pause maps to stop in this backend"})
+    result = patrol_service.pause_patrol()
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("error", "refused"))
+    return _ok({"paused": True, "session": result.get("session")})
+
+
+@router.post("/robots/{robot_id}/patrol/resume")
+def patrol_resume(robot_id: str):
+    """Phase 5 (P10): resume from the paused waypoint (was: fresh start)."""
+    from services import patrol_service
+    result = patrol_service.resume_patrol()
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("error", "refused"))
+    return _ok({"resumed": True, "session": result.get("session")})
 
 
 @router.post("/robots/{robot_id}/patrol/stop")
@@ -440,8 +571,47 @@ def list_alerts():
     return JSONResponse([cm.alert_object(n) for n in items])
 
 
-@router.post("/alerts/{alert_id}/dismiss")
+def _get_notification(alert_id: str):
+    from services import notification_service
+    for n in notification_service.get(severity="ALL", limit=500):
+        if n["id"] == alert_id:
+            return n
+    raise HTTPException(status_code=404, detail="unknown alert")
+
+
+@router.get("/alerts/{alert_id}")
+def get_alert(alert_id: str):
+    """Phase 1 contract: alert detail for the alert-detail screen."""
+    return _ok(cm.alert_object(_get_notification(alert_id)))
+
+
+@router.get("/alerts/{alert_id}/image")
+def get_alert_image(alert_id: str):
+    """Phase 3: serve the JPEG snapshot attached to the alert (unknown-person
+    events carry one from person_recognition). Falls back to 404 when the
+    event had no snapshot or the file is gone."""
+    import os
+    from fastapi.responses import Response as _Response
+    from services import person_recognition
+    n = _get_notification(alert_id)
+    image_file = n.get("image_file")
+    if not image_file:
+        raise HTTPException(status_code=404, detail="no image attached")
+    path = os.path.join(person_recognition.SNAPSHOT_DIR,
+                        os.path.basename(image_file))
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="snapshot file missing")
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        raise HTTPException(status_code=404, detail="snapshot file missing")
+    return _Response(content=data, media_type="image/jpeg")
+
+
+@router.api_route("/alerts/{alert_id}/dismiss", methods=["POST", "PATCH"])
 def dismiss_alert(alert_id: str):
+    """App spec uses PATCH; the original Phase 21 build used POST — both work."""
     from services import notification_service
     ok = notification_service.ack(alert_id)
     if not ok:
@@ -551,6 +721,15 @@ def delete_person_compat(person_id: str):
 _calls: dict[str, dict] = {}
 
 
+def register_call(call: dict) -> None:
+    """Store a call + push call_incoming. Used by REST initiate AND the WS
+    CALL_USER voice path (ws_handlers/app_ws.py)."""
+    _calls[call["id"]] = call
+    from ws_handlers import compat_ws
+    compat_ws.push_event("call_incoming",
+                         {"callId": call["id"], "robotId": call["robot_id"]})
+
+
 def _call_object(call: dict) -> dict:
     return {
         "id": call["id"],
@@ -592,6 +771,18 @@ def _get_call(call_id: str) -> dict:
     if call is None:
         raise HTTPException(status_code=404, detail="unknown call")
     return call
+
+
+@router.get("/calls/{call_id}")
+def get_call(call_id: str):
+    """Phase 1 contract: call polling for the call screen."""
+    return _ok(_call_object(_get_call(call_id)))
+
+
+@router.get("/calls/{call_id}")
+def get_call(call_id: str):
+    """Phase 1 contract: call polling for the call screen."""
+    return _ok(_call_object(_get_call(call_id)))
 
 
 @router.post("/calls/{call_id}/accept")

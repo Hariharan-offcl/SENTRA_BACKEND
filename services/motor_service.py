@@ -56,34 +56,49 @@ _state = {
     "target_mps": 0.0,
 }
 
-_h = None
+_h = None                      # Phase 2: alias of the SHARED gpio_manager handle
 _gpio_lock = threading.Lock()  # lgpio chip handle is not thread-safe
 
 
 def _init_hardware():
+    """Phase 2: claim the six L298N pins through the shared gpio_manager
+    handle (the same one the HAL and every sensor service use) instead of
+    opening a private gpiochip4. Simulation mode still refuses."""
     global _h
     from core.simulation import activate_once
     activate_once()  # Phase 18: simulation mode refuses GPIO init
     if not _LGPIO_AVAILABLE or core_config.SIMULATION:
         return
-    try:
-        _h = lgpio.gpiochip_open(4)  # Pi 5 main GPIO chip
-        for pin in [ENA, IN1, IN2, ENB, IN3, IN4]:
-            lgpio.gpio_claim_output(_h, pin, 0)
-        logger.info("SENTRA motor hardware initialized on Pi 5 (lgpio)")
-    except Exception as e:
-        logger.error(f"Failed to initialize lgpio: {e}")
+    from hardware.gpio_manager import gpio_manager
+    h = gpio_manager.chip
+    if h is None:
+        logger.error("Motor service: no shared GPIO handle available")
+        return
+    # Owner "motor" is shared with the HAL PhysicalMotor on purpose: claims
+    # are idempotent per owner, so HAL-first or service-first both succeed
+    # and there is exactly ONE claim of the L298N pins on ONE handle.
+    ok = all(gpio_manager.claim_output(pin, owner="motor", initial=0)
+             for pin in (ENA, IN1, IN2, ENB, IN3, IN4))
+    if ok:
+        _h = h
+        logger.info("SENTRA motor pins claimed on the shared GPIO handle")
+    else:
+        logger.error("Motor service: pin claim failed — running simulated")
         _h = None
 
 
 def _cleanup_hardware():
+    """Zero the motors; the shared handle itself is closed once by the HAL."""
     if _h is not None:
-        _set_motor(ENA, IN1, IN2, 0)
-        _set_motor(ENB, IN3, IN4, 0)
-        lgpio.gpiochip_close(_h)
+        try:
+            _set_motor(ENA, IN1, IN2, 0)
+            _set_motor(ENB, IN3, IN4, 0)
+        except Exception as exc:
+            logger.warning("Motor cleanup write failed: %s", exc)
 
 
-# Initialize on startup, clean up on shutdown
+# Initialize on startup (idempotent, claims via the SHARED gpio_manager
+# handle), clean up on shutdown (no chip close here — gpio_manager owns it).
 _init_hardware()
 atexit.register(_cleanup_hardware)
 
@@ -124,10 +139,6 @@ def _check_for_stall():
     except Exception as e:
         logger.error("Stall guard check error: %s", e)
 
-# Initialize on startup, clean up on shutdown
-_init_hardware()
-atexit.register(_cleanup_hardware)
-
 
 def get_state() -> dict:
     """Compatibility view over the central state + local speed settings."""
@@ -142,7 +153,9 @@ def get_state() -> dict:
 
 
 def _set_motor(en, a, b, speed_pct):
-    """Low-level motor control (speed_pct: -100 to 100). Called by safety layer only."""
+    """Low-level motor control (speed_pct: -100 to 100). Called by safety layer only.
+    Phase 2: kept as a defensive direct path; in the normal build the drive
+    traffic flows through _apply_wheel_duty → HAL → the same shared handle."""
     if _h is None:
         return  # Dev mode
 
@@ -162,29 +175,23 @@ def _set_motor(en, a, b, speed_pct):
 
 
 def apply_active_brake() -> None:
-    """Active brake: both direction pins HIGH = shorted motor terminals on L298N.
-    Holds for BRAKE_HOLD_S, then releases to neutral. Dev mode just sleeps."""
-    hold = 0.5 if _h is None else core_config.BRAKE_HOLD_S
-    with _gpio_lock:
-        if _h is not None:
-            # Both LOW first to stop PWM drive
-            for a, b in ((IN1, IN2), (IN3, IN4)):
-                lgpio.gpio_write(_h, a, 0)
-                lgpio.gpio_write(_h, b, 0)
-            lgpio.tx_pwm(_h, ENA, 1000, 0)
-            lgpio.tx_pwm(_h, ENB, 1000, 0)
-            # Short both terminals: INx both HIGH, full duty
-            for en, a, b in ((ENA, IN1, IN2), (ENB, IN3, IN4)):
-                lgpio.gpio_write(_h, a, 1)
-                lgpio.gpio_write(_h, b, 1)
-                lgpio.tx_pwm(_h, en, 1000, 100)
-        time.sleep(hold)
-        if _h is not None:
-            # Release to neutral
-            for en, a, b in ((ENA, IN1, IN2), (ENB, IN3, IN4)):
-                lgpio.gpio_write(_h, a, 0)
-                lgpio.gpio_write(_h, b, 0)
-                lgpio.tx_pwm(_h, en, 1000, 0)
+    """Active brake: shorted motor terminals on the L298N, held for
+    BRAKE_HOLD_S, then released to neutral.
+
+    Phase 2 consolidation: routed through the HAL motor's brake() so the
+    short-brake sequence runs on the SAME shared handle and pins as the
+    drive path — never again through a second, privately-opened chip.
+    Simulated drivers record the brake and return instantly (dev mode and
+    tests must not stall); the real hold sleep only happens on hardware."""
+    from hardware.manager import hardware_manager
+    motor = hardware_manager.motor
+    if motor is not None and getattr(motor, "initialized", False):
+        motor.brake(core_config.BRAKE_HOLD_S)
+    else:
+        # No initialised HAL (dev box): behave like the old dev path — no-op
+        # without a hardware hold sleep.
+        _set_motor(ENA, IN1, IN2, 0)
+        _set_motor(ENB, IN3, IN4, 0)
 
 
 from hardware.manager import hardware_manager

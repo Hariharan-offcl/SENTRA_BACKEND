@@ -44,6 +44,15 @@ logger = logging.getLogger(__name__)
 AUTH_ENFORCED = os.getenv("SENTRA_AUTH_ENFORCED", "true").strip().lower() in (
     "1", "true", "yes", "on")
 
+# Phase 4 hardening: when SENTRA_PASSWORD is set, /api/auth/login must
+# present it (the old "any password logs in" stance stays available for
+# bench testing by simply not setting the variable — loudly flagged by
+# core.hardening at startup).
+APP_PASSWORD = os.getenv("SENTRA_PASSWORD", "").strip()
+# Phase 4 hardening: when SENTRA_PAIRING_CODE is set, /api/auth/rover/pair
+# must present the same code the Pi displays (default: 123456 demo code).
+PAIRING_CODE = os.getenv("SENTRA_PAIRING_CODE", "123456").strip()
+
 REFRESH_TTL_S = 60 * 60 * 24 * 30   # 30 days
 
 OPEN_PATHS = {
@@ -56,6 +65,11 @@ OPEN_PATHS = {
     "/api/v1/docs", "/api/v1/openapi.json",
     # Phase 21 compat aliases (final app spec): login + rover pairing + logout
     "/api/auth/login", "/api/auth/rover/pair", "/api/auth/logout",
+    # Phase 1 contract: pairing-token exchange (the 6-digit code IS the
+    # credential at this moment — same trust moment as /api/auth/login)
+    "/api/auth/rover/register",
+    # Phase 1 contract: discovery liveness probe (GET-only, read-only anyway)
+    "/api/health",
 }
 
 ROLE_PERMISSIONS = {
@@ -129,6 +143,52 @@ def rotate_session(refresh_token: str) -> dict:
     # (Roles are chosen at login; rotation preserves the device, not the role,
     # so the app should re-login to change role.)
     return issue_session(found["device_id"], "GUARD")
+
+
+def check_password(password: str) -> bool:
+    """Phase 4: constant-time-ish password gate. True when no password is
+    configured (open-appliance mode) or on a match."""
+    if not APP_PASSWORD:
+        return True
+    import hmac
+    return hmac.compare_digest(str(password or ""), APP_PASSWORD)
+
+
+def check_pairing_code(code: str) -> bool:
+    import hmac
+    return hmac.compare_digest(str(code or "").strip(), PAIRING_CODE)
+
+
+async def verify_ws_token(websocket: WebSocket) -> Optional[AuthContext]:
+    """Phase 4: token gate for the previously-unauthenticated sockets
+    (/ws/telemetry, /ws/alerts, /ws/call/*, /ws/webrtc/*).
+
+    Returns an AuthContext on success. On failure the socket is accepted and
+    closed with 4401 (same contract as the app sockets) and None is returned.
+    When enforcement is off, an anonymous GUEST context is returned.
+    """
+    token = (websocket.query_params.get("token") or "").strip()
+    if not AUTH_ENFORCED:
+        return AuthContext(device_id=token or "anon", role="GUEST",
+                           permissions=["TELEMETRY_READ"], kind="user", jti="-")
+    if not token:
+        await _deny_ws(websocket, "missing token")
+        return None
+    try:
+        return verify_token(token)
+    except Exception as exc:
+        await _deny_ws(websocket, str(exc))
+        return None
+
+
+async def _deny_ws(websocket: WebSocket, reason: str) -> None:
+    try:
+        # accept() then close() is the reliable cross-driver refusal.
+        await websocket.accept()
+        await websocket.close(code=4401)
+    except Exception:
+        pass
+    logger.info("WS denied (4401): %s", reason)
 
 
 def verify_token(token: str) -> AuthContext:

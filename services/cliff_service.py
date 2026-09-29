@@ -57,7 +57,7 @@ _thread: threading.Thread | None = None
 
 
 def _init_hardware() -> None:
-    """Claim cliff pins. Prefers the motor service's shared chip handle."""
+    """Claim cliff pins on the SHARED gpio_manager handle (Phase 2)."""
     global _h, _h_owned, _simulated
     from core.simulation import activate_once
     activate_once()  # Phase 18: simulation mode refuses GPIO init
@@ -66,17 +66,15 @@ def _init_hardware() -> None:
             _simulated = True  # report simulated, not "hardware fresh"
         return
     try:
-        from services.motor_service import _h as motor_h
-        if motor_h is not None:
-            _h = motor_h
-            _h_owned = False
-        else:
-            _h = lgpio.gpiochip_open(4)
-            _h_owned = True
-        for pin in (CLIFF_LEFT_GPIO, CLIFF_RIGHT_GPIO):
-            lgpio.gpio_claim_input(_h, pin)
+        from hardware.gpio_manager import gpio_manager
+        if not gpio_manager.claim_input(CLIFF_LEFT_GPIO, owner="cliff.service"):
+            raise RuntimeError(f"pin {CLIFF_LEFT_GPIO} unavailable")
+        if not gpio_manager.claim_input(CLIFF_RIGHT_GPIO, owner="cliff.service"):
+            raise RuntimeError(f"pin {CLIFF_RIGHT_GPIO} unavailable")
+        _h = gpio_manager.chip
+        _h_owned = False
         _simulated = False
-        logger.info("Cliff sensors initialized on GPIO %d/%d (active-%s)",
+        logger.info("Cliff sensors initialized on GPIO %d/%d (active-%s, shared handle)",
                     CLIFF_LEFT_GPIO, CLIFF_RIGHT_GPIO,
                     "high" if CLIFF_ACTIVE_HIGH else "low")
     except Exception as exc:

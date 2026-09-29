@@ -1,6 +1,12 @@
 import logging
 import time
-import lgpio
+
+try:
+    import lgpio
+    _LGPIO_AVAILABLE = True
+except ImportError:
+    _LGPIO_AVAILABLE = False
+
 from .base import BaseUltrasonic
 from hardware.gpio_manager import gpio_manager
 
@@ -17,14 +23,16 @@ class PhysicalUltrasonic(BaseUltrasonic):
 
     def initialize(self):
         try:
+            if not _LGPIO_AVAILABLE:
+                raise RuntimeError("lgpio not available (dev machine?)")
+            if not gpio_manager.claim_output(self.trig, owner="ultrasonic.hal"):
+                raise RuntimeError(f"pin {self.trig} unavailable")
+            if not gpio_manager.claim_input(self.echo, owner="ultrasonic.hal"):
+                raise RuntimeError(f"pin {self.echo} unavailable")
+
             h = gpio_manager.chip
-            if h is None:
-                raise RuntimeError("GPIO chip not available")
-
-            lgpio.gpio_claim_output(h, self.trig)
-            lgpio.gpio_claim_input(h, self.echo)
-
-            lgpio.gpio_write(h, self.trig, 0)
+            if h is not None:
+                lgpio.gpio_write(h, self.trig, 0)
             self.initialized = True
             logger.info(f"PhysicalUltrasonic ({self.name}): Initialized Trig={self.trig} Echo={self.echo}")
         except Exception as e:

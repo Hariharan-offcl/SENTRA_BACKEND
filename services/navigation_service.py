@@ -54,8 +54,38 @@ def _latest_detection(tag_id: int, max_age_s: float) -> Optional[dict]:
 
 # ── Session API ──────────────────────────────────────────────────────────────
 
+def _plan_hops(target_name: str, tag_id: int) -> tuple[list[dict], Optional[str]]:
+    """Phase 5 (P11): plan the hop list through the taught route graph.
+    Returns (hops, current_location_name). Falls back to a single direct hop
+    whenever the graph can't help (no current fix, no path, stale edges) —
+    a sparse graph must never make go_to refuse."""
+    from services import tag_map, route_graph, localization_service
+    direct = [{"name": target_name, "tag_id": int(tag_id)}]
+    try:
+        loc = localization_service.get_localization().get("last_known") or {}
+        current = loc.get("name")
+    except Exception:
+        current = None
+    if not current or current == target_name:
+        return direct, current
+    path = route_graph.find_path(current, target_name)
+    if not path or len(path) < 2:
+        return direct, current
+    hops = []
+    for name in path[1:]:
+        t = tag_map.find_by_name(name)
+        if t is None:
+            return direct, current  # graph edge references a deleted tag
+        hops.append({"name": name, "tag_id": int(t["tag_id"])})
+    if not hops:
+        return direct, current
+    return hops, current
+
+
 def go_to(tag_id: int, target_name: str, source: str = "voice") -> dict:
-    """Start navigating to the location bound to tag_id."""
+    """Start navigating to the location bound to tag_id. When the taught
+    route graph knows a path from the current location, the session walks it
+    hop by hop (P11); otherwise it is the original direct per-tag nav."""
     global _session
     st = get_robot_state()
     if st.is_estop_active():
@@ -64,22 +94,31 @@ def go_to(tag_id: int, target_name: str, source: str = "voice") -> dict:
     if not result.get("accepted"):
         return {"ok": False, "error": f"mode_unavailable ({st.get_mode()})"}
 
+    hops, prev_node = _plan_hops(target_name, tag_id)
     with _lock:
         _session = {
             "id": f"nav-{int(time.time())}",
             "state": "SEEK",
-            "tag_id": int(tag_id),
-            "target": target_name,
+            "tag_id": int(hops[0]["tag_id"]),
+            "target": hops[0]["name"],
+            "final_target": target_name,
             "source": source,
             "started_at": time.time(),
             "state_started_at": time.time(),
             "blocked_since": None,
             "search_direction": 1,
+            "hops": hops,
+            "hop_index": 0,
+            "prev_node": prev_node,
+            "completed_hops": [],
         }
-    logger.info("Navigation %s: go to '%s' (tag %d) via %s",
-                _session["id"], target_name, tag_id, source)
+    hop_desc = " → ".join(h["name"] for h in hops)
+    logger.info("Navigation %s: go to '%s' via %s%s",
+                _session["id"], target_name, source,
+                f" | hops: {hop_desc}" if len(hops) > 1 else "")
     _log_event({"event": "started", "target": target_name, "tag_id": tag_id,
-                "source": source})
+                "source": source,
+                "hops": [h["name"] for h in hops] if len(hops) > 1 else None})
     return {"ok": True, "session": status()}
 
 
@@ -107,6 +146,9 @@ def status() -> Optional[dict]:
             return None
         sess = dict(_session)
         sess["age_s"] = round(time.time() - sess["started_at"], 1)
+        sess["hop_index"] = sess.get("hop_index", 0)
+        sess["hop_count"] = len(sess.get("hops") or [])
+        sess["final_target"] = sess.get("final_target") or sess["target"]
         return sess
 
 
@@ -188,18 +230,52 @@ def _state_approach(sess: dict) -> None:
 
 
 def _arrived(sess: dict) -> None:
+    """Phase 5 (P11): arrival at the CURRENT hop. Intermediate hops advance
+    the session to the next hop (teaching the driven edge into the graph);
+    the final hop ends the session like the old single-hop arrival."""
     global _session
     with _lock:
-        target = _session["target"] if _session else None
-        tag_id = _session["tag_id"] if _session else None
-        _session = None
+        if _session is None or _session["id"] != sess["id"]:
+            return
+        hops = _session.get("hops") or []
+        i = _session.get("hop_index", 0)
+        hop = hops[i] if i < len(hops) else {
+            "name": _session["target"], "tag_id": _session["tag_id"]}
+        _session["completed_hops"].append(hop["name"])
+        completed = _session["completed_hops"]
+        prev_node = (_session.get("prev_node")
+                     if len(completed) == 1 else completed[-2])
+        next_i = i + 1
+        advance = next_i < len(hops)
+        if advance:
+            nxt = hops[next_i]
+            _session["hop_index"] = next_i
+            _session["tag_id"] = nxt["tag_id"]
+            _session["target"] = nxt["name"]
+            _session["state"] = "SEEK"
+            _session["state_started_at"] = time.time()
+            _session["blocked_since"] = None
+            _session["prev_node"] = hop["name"]
+        else:
+            final = _session.get("final_target") or hop["name"]
+            _session = None
+    # Teach the edge we just drove (auto-learning, never raises).
+    from services import route_graph
+    route_graph.observe_traversal(prev_node, hop["name"])
+
     from services.motor_service import stop_all
     stop_all("nav_done")
+    if advance:
+        logger.info("Nav: hop arrived at '%s' → next hop '%s'",
+                    hop["name"], nxt["name"])
+        _log_event({"event": "hop", "arrived": hop["name"],
+                    "next": nxt["name"]})
+        return
     st = get_robot_state()
     if st.get_mode() == NAVIGATION:
         st.request_mode(STANDBY, requested_by="navigation_service")
-    logger.info("Nav: ARRIVED at '%s' (tag %s)", target, tag_id)
-    _log_event({"event": "arrived", "target": target, "tag_id": tag_id})
+    logger.info("Nav: ARRIVED at '%s' (tag %s)", final, hop["tag_id"])
+    _log_event({"event": "arrived", "target": final, "tag_id": hop["tag_id"]})
 
 
 # ── Engine ───────────────────────────────────────────────────────────────────

@@ -4,9 +4,19 @@ websockets>=14,<16
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 opencv-python-headless==4.10.0.84
+# Pi note: if the OpenCV pip wheel is unavailable for your ARM64 distro,
+# `sudo apt install python3-opencv` provides the same `import cv2` —
+# the code only requires the cv2 module to be importable.
+# Directly imported (person_detection, person_recognition, apriltag_service,
+# tests) — pin explicitly instead of relying on OpenCV's transitive dep.
+numpy>=1.26,<3
 python-multipart==0.0.12
 aiofiles==24.1.0
 pydantic-settings==2.5.2
 smbus2>=0.4.3
 Pillow>=10.0.0
 psutil>=6.0.0
+# NOTE (Raspberry Pi OS Bookworm): lgpio ships with the OS; if missing run
+#   sudo apt install python3-lgpio
+# Run:  uvicorn main:app --host 0.0.0.0 --port 8080
+#       or: python3 main.py   (see deploy/sentra-backend.service)

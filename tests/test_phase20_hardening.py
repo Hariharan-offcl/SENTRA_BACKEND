@@ -39,6 +39,9 @@ def check(name, condition, detail=""):
 print("\n[1] setup")
 os.environ["SENTRA_AUTH_ENFORCED"] = "true"
 os.environ["SENTRA_DEVICES_PATH"] = os.path.join(tempfile.mkdtemp(), "devices.json")
+# Phase 4: a configured password means NO_PASSWORD_CHECK stays silent and
+# the "no findings with real secret" runs truly clean.
+os.environ["SENTRA_PASSWORD"] = "hardening-suite-pass"
 
 import services.tag_map as tag_map
 tag_map.load(os.path.join(tempfile.mkdtemp(), "tag_map.json"))

@@ -190,6 +190,18 @@ def _engine_loop() -> None:
         route_name = session["route"]
         waypoints = session["waypoints"]
 
+        # Phase 5 (P10): PAUSED holds the session and its index with the
+        # motors stopped (stop_all fired once in pause_patrol()). E-stop or a
+        # mode takeover still ends the session — safety always wins over pause.
+        if session.get("paused"):
+            if st.is_estop_active() or st.get_mode() not in (PATROL,):
+                reason = "estop" if st.is_estop_active() else f"mode_changed_to_{st.get_mode()}"
+                stop_all("patrol_engine")
+                _end_session(reason)
+                continue
+            _engine_stop.wait(ENGINE_TICK_S)
+            continue
+
         # Respect e-stop / manual takeover → end session
         if st.is_estop_active() or st.get_mode() not in (PATROL,):
             reason = "estop" if st.is_estop_active() else f"mode_changed_to_{st.get_mode()}"
@@ -339,6 +351,8 @@ def start_patrol(route: Optional[str] = None) -> dict:
                 "waypoint_started_at": time.time(),
                 "blocked": False,
                 "blocked_since": None,
+                "paused": False,
+                "paused_at": None,
                 "confirmed_waypoints": [],
                 "skipped_waypoints": [],
                 "mode": "route",
@@ -379,6 +393,47 @@ def stop_patrol() -> dict:
         st.request_mode(STANDBY, requested_by="patrol_service")
     _log_event({"event": "stopped"})
     return {"ok": True, "was_active": had}
+
+
+# ── Pause / resume (Phase 5, audit P10) ──────────────────────────────────────
+
+def pause_patrol() -> dict:
+    """Pause the active patrol session: motors stop NOW, the session and its
+    waypoint index are kept, mode stays PATROL. Idempotent."""
+    with _lock:
+        if _session is None:
+            return {"ok": False, "error": "no_active_patrol",
+                    "paused": False}
+        if not _session.get("paused"):
+            _session["paused"] = True
+            _session["paused_at"] = time.time()
+    from services.motor_service import stop_all
+    stop_all("patrol_pause")
+    logger.info("Patrol paused at waypoint %d/%d",
+                _session["index"], len(_session["waypoints"]))
+    _log_event({"event": "paused", "route": _session["route"],
+                "waypoint_index": _session["index"]})
+    return {"ok": True, "paused": True, "session": _session_status()}
+
+
+def resume_patrol() -> dict:
+    """Resume a paused patrol session from the same waypoint. If the waypoint
+    was paused a long time, its timeout clock restarts (fresh attempt)."""
+    with _lock:
+        if _session is None:
+            return {"ok": False, "error": "no_active_patrol", "resumed": False}
+        if not _session.get("paused"):
+            return {"ok": True, "resumed": False, "note": "not_paused",
+                    "session": _session_status()}
+        _session["paused"] = False
+        _session["paused_at"] = None
+        # Give the waypoint a fresh timeout window after a pause.
+        _session["waypoint_started_at"] = time.time()
+    logger.info("Patrol resumed at waypoint %d/%d",
+                _session["index"], len(_session["waypoints"]))
+    _log_event({"event": "resumed", "route": _session["route"],
+                "waypoint_index": _session["index"]})
+    return {"ok": True, "resumed": True, "session": _session_status()}
 
 
 def _session_status() -> Optional[dict]:

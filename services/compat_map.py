@@ -136,14 +136,16 @@ def route_object(name: str, waypoints: list[str]) -> dict:
 
 
 def person_object(record: dict) -> dict:
-    """person_registry record → app person object (spec §13a)."""
+    """person_registry record → app person object (spec §13a).
+    Phase 3: image_url points at the /media static mount of the recognition
+    snapshot dir (the old /media/faces/... prefix never matched any mount)."""
     snap = record.get("snapshot_path")
     return {
         "id": record["person_key"],
         "name": record["name"],
         "notes": record.get("notes", "") or "",
         "registered_at": iso(record.get("created_at")),
-        "image_url": f"/media/faces/{os.path.basename(snap)}" if snap else None,
+        "image_url": f"/media/{os.path.basename(snap)}" if snap else None,
     }
 
 
@@ -176,7 +178,10 @@ def alert_object(n: dict) -> dict:
         "location": n.get("location"),
         "confidence": None,
         "status": "dismissed" if n.get("acknowledged") else "active",
-        "image_url": None,
+        # Phase 3: real snapshot URL when the event carried one (unknown-person
+        # events); the REST route serves the same bytes with auth.
+        "image_url": (f"/media/{n['image_file']}"
+                      if n.get("image_file") else None),
     }
 
 
@@ -291,11 +296,10 @@ def navigation_event() -> dict:
 
 
 def camera_status() -> dict:
-    """App spec §11 camera status (rover phone is the only vision source)."""
-    from services import vision_service
-    try:
-        stats = vision_service.stats()
-    except Exception:
-        stats = {}
-    streaming = bool(stats.get("frames_seen", 0) > 0)
-    return {"is_streaming": streaming, "stream_url": None}
+    """App spec §11 camera status (rover phone is the only vision source).
+    Phase 1 fix: stream liveness comes from the call service's node frame
+    freshness (the old `frames_seen` key never existed in vision stats)."""
+    from services import call_service
+    streaming = (call_service.node_frame is not None
+                 and (time.time() - call_service.node_last_seen) < 5.0)
+    return {"is_streaming": bool(streaming), "stream_url": None}
