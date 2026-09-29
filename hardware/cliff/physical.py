@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 # Override via SENTRA_CLIFF_LEFT_GPIO / SENTRA_CLIFF_RIGHT_GPIO once wired.
 CLIFF_ENABLED = os.getenv("SENTRA_CLIFF_ENABLED", "true").strip().lower() in (
     "1", "true", "yes", "on")
-CLIFF_LEFT_GPIO = int(os.getenv("SENTRA_CLIFF_LEFT_GPIO", "19"))
-CLIFF_RIGHT_GPIO = int(os.getenv("SENTRA_CLIFF_RIGHT_GPIO", "26"))
+CLIFF_LEFT_GPIO = int(os.getenv("SENTRA_CLIFF_LEFT_GPIO", "4"))
+CLIFF_RIGHT_GPIO = int(os.getenv("SENTRA_CLIFF_RIGHT_GPIO", "8"))
 CLIFF_ACTIVE_HIGH = os.getenv("SENTRA_CLIFF_ACTIVE_HIGH", "true").strip().lower() in (
     "1", "true", "yes", "on")
 

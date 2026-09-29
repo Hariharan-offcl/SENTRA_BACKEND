@@ -57,28 +57,30 @@ _thread: threading.Thread | None = None
 
 
 def _init_hardware() -> None:
-    """Claim cliff pins on the SHARED gpio_manager handle (Phase 2)."""
+    """Link to the HAL's cliff sensor instead of claiming pins itself."""
     global _h, _h_owned, _simulated
     from core.simulation import activate_once
-    activate_once()  # Phase 18: simulation mode refuses GPIO init
-    if not CLIFF_ENABLED or not _LGPIO_AVAILABLE or core_config.SIMULATION:
+    activate_once()
+    if not CLIFF_ENABLED or core_config.SIMULATION:
         if core_config.SIMULATION:
-            _simulated = True  # report simulated, not "hardware fresh"
+            _simulated = True
         return
     try:
+        from hardware.manager import hardware_manager
+        # Use the HAL instance; it handles the GPIO claims
+        cliff_hal = hardware_manager.cliff
+        if cliff_hal is None or not getattr(cliff_hal, "initialized", False):
+            # Give the HAL a moment or attempt to trigger its initialization if needed
+            # In this architecture, hardware_manager.initialize() is called in main.py
+            raise RuntimeError("Cliff HAL not initialized")
+
         from hardware.gpio_manager import gpio_manager
-        if not gpio_manager.claim_input(CLIFF_LEFT_GPIO, owner="cliff.service"):
-            raise RuntimeError(f"pin {CLIFF_LEFT_GPIO} unavailable")
-        if not gpio_manager.claim_input(CLIFF_RIGHT_GPIO, owner="cliff.service"):
-            raise RuntimeError(f"pin {CLIFF_RIGHT_GPIO} unavailable")
-        _h = gpio_manager.chip
+        _h = gpio_manager.chip # Use shared handle
         _h_owned = False
         _simulated = False
-        logger.info("Cliff sensors initialized on GPIO %d/%d (active-%s, shared handle)",
-                    CLIFF_LEFT_GPIO, CLIFF_RIGHT_GPIO,
-                    "high" if CLIFF_ACTIVE_HIGH else "low")
+        logger.info("Cliff service linked to HAL (shared handle)")
     except Exception as exc:
-        logger.warning("Cliff hardware init failed — simulated (%s)", exc)
+        logger.warning("Cliff service linkage failed — simulated (%s)", exc)
         _h = None
         _h_owned = False
         _simulated = True
