@@ -29,7 +29,7 @@ _snapshot: dict = {
     "left_cliff": False,
     "right_cliff": False,
     "imu": {},
-    "wheel_encoders": {},
+    "current": {},
     "timestamp": 0.0,
 }
 _health: dict = {}
@@ -63,14 +63,14 @@ def _build_once() -> None:
     daemon threads own the hardware reads; this aggregator never blocks).
     Distances come from the telemetry ultrasonic state, which the HAL path
     keeps updated when real hardware is present."""
-    from services import cliff_service, encoder_service, imu_service
+    from services import cliff_service, current_service, imu_service
     from services.telemetry_service import _sim
 
     ultra = _sim.get("ultrasonic", {})
     ultra_last = ultra.get("last_read", 0.0)
 
     cliff_frag = cliff_service.sensor_provider()
-    enc_frag = encoder_service.sensor_provider()
+    curr_frag = current_service.sensor_provider()
     imu_frag = imu_service.sensor_provider()
 
     snap = {
@@ -79,7 +79,7 @@ def _build_once() -> None:
         "left_cliff": bool(cliff_frag["left_cliff"]),
         "right_cliff": bool(cliff_frag["right_cliff"]),
         "imu": imu_frag["imu"],
-        "wheel_encoders": enc_frag["wheel_encoders"],
+        "current": curr_frag["current"],
         "timestamp": time.time(),
     }
 
@@ -92,9 +92,9 @@ def _build_once() -> None:
         "imu": _health_of(enabled=bool(imu_frag.get("imu_enabled", True)),
                           simulated=bool(imu_frag.get("imu_simulated", True)),
                           last_read=imu_frag.get("imu_last_read")),
-        "wheel_encoders": _health_of(enabled=bool(enc_frag.get("encoders_enabled", True)),
-                                     simulated=bool(enc_frag.get("encoders_simulated", True)),
-                                     last_read=enc_frag.get("encoders_last_read")),
+        "current": _health_of(enabled=bool(curr_frag.get("current_enabled", True)),
+                                     simulated=bool(curr_frag.get("current_simulated", True)),
+                                     last_read=curr_frag.get("current_last_read")),
     }
 
     with _lock:

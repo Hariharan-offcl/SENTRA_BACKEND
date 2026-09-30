@@ -97,6 +97,9 @@ async def lifespan(app: FastAPI):
 
     from services import imu_service
     imu_service.start_monitoring()
+    
+    from services import current_service
+    current_service.start()
 
     safety = get_safety_layer()
     safety.wire(motor_apply=motor_service._apply_wheel_duty,
@@ -228,6 +231,8 @@ async def lifespan(app: FastAPI):
     motion.shutdown()
     motor_service.stop_patrol_loop()
     motor_service.stop_all("shutdown")
+    sensor_service.stop()
+    current_service.stop()
 
 
 # ── App factory ───────────────────────────────────────────────────────────────

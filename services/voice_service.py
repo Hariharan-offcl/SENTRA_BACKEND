@@ -115,7 +115,7 @@ def _dispatch_go_to(target: str) -> dict:
         known = [t["name"] for t in tag_map.list_tags()]
         return {"handled": False, "error": f"unknown_location:{target}",
                 "known_locations": known}
-    result = navigation_service.go_to(tag["tag_id"], tag["name"], source="voice")
+    result = navigation_service.go_to(tag["tag_id"], tag["name"], source="voice", search_person=True)
     if not result.get("ok"):
         return {"handled": False, "error": result.get("error")}
     return {"handled": True, "action": "go_to", "target": tag["name"],

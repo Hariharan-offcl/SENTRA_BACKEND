@@ -102,8 +102,8 @@ def get_ws_telemetry_payload() -> dict:
         if snap.get("timestamp", 0.0) > 0.0:
             if snap.get("imu"):
                 payload["mpu6050"] = snap["imu"]
-            if snap.get("wheel_encoders"):
-                payload["wheel_encoders"] = snap["wheel_encoders"]
+            if snap.get("current"):
+                payload["current"] = snap["current"]
     except Exception:
         pass
     return payload

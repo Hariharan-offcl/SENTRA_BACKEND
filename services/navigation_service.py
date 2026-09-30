@@ -82,7 +82,7 @@ def _plan_hops(target_name: str, tag_id: int) -> tuple[list[dict], Optional[str]
     return hops, current
 
 
-def go_to(tag_id: int, target_name: str, source: str = "voice") -> dict:
+def go_to(tag_id: int, target_name: str, source: str = "voice", search_person: bool = False) -> dict:
     """Start navigating to the location bound to tag_id. When the taught
     route graph knows a path from the current location, the session walks it
     hop by hop (P11); otherwise it is the original direct per-tag nav."""
@@ -111,6 +111,7 @@ def go_to(tag_id: int, target_name: str, source: str = "voice") -> dict:
             "hop_index": 0,
             "prev_node": prev_node,
             "completed_hops": [],
+            "search_person": search_person,
         }
     hop_desc = " → ".join(h["name"] for h in hops)
     logger.info("Navigation %s: go to '%s' via %s%s",
@@ -206,7 +207,7 @@ def _state_approach(sess: dict) -> None:
         return
     det = _latest_detection(sess["tag_id"], max_age_s=core_config.DOCK_TAG_LOST_GRACE_S)
     if det is None:
-        logger.warning("Nav %s: tag lost — re-seeking", sess["id"])
+        logger.warning("Nav %s: tag lost ?" re-seeking", sess["id"])
         _set_state(sess, "SEEK")
         return
 
@@ -221,6 +222,75 @@ def _state_approach(sess: dict) -> None:
     steer = max(-40.0, min(40.0, bearing * core_config.DOCK_STEER_GAIN))
     decision = apply_wheel_speeds(duty - steer, duty + steer,
                                   owner="navigation_service", mode=NAVIGATION)
+    if not decision.get("applied"):
+        _handle_gate_refusal(sess)
+    else:
+        with _lock:
+            if _session and _session["id"] == sess["id"]:
+                _session["blocked_since"] = None
+
+
+def _get_tracked_person():
+    from services.person_detection import get_tracked
+    tracked = get_tracked()
+    if tracked:
+        return tracked[0]
+    return None
+
+
+def _state_person_search(sess: dict) -> None:
+    from services.motor_service import apply_wheel_speeds
+    if time.time() - sess["state_started_at"] > core_config.NAV_SEARCH_TIMEOUT_S:
+        logger.warning("Nav %s: person search timed out", sess["id"])
+        _log_event({"event": "person_search_timeout"}, severity="WARNING")
+        cancel("person_search_timeout")
+        return
+
+    person = _get_tracked_person()
+    if person is not None and person["age_s"] < 1.0:
+        logger.info("Nav %s: Person detected, transitioning to PERSON_APPROACH", sess["id"])
+        _set_state(sess, "PERSON_APPROACH")
+        return
+
+    # Slowly rotate to search
+    duty = max(20.0, core_config.DOCK_SEARCH_TURN_DUTY * 0.8)
+    decision = apply_wheel_speeds(duty, -duty, owner="navigation_service", mode=NAVIGATION)
+    if not decision.get("applied"):
+        _handle_gate_refusal(sess)
+
+
+def _state_person_approach(sess: dict) -> None:
+    from services.motor_service import apply_wheel_speeds
+    if time.time() - sess["state_started_at"] > core_config.NAV_APPROACH_TIMEOUT_S:
+        logger.warning("Nav %s: person approach timed out", sess["id"])
+        cancel("person_approach_timeout")
+        return
+
+    person = _get_tracked_person()
+    if person is None or person["age_s"] > 2.0:
+        logger.warning("Nav %s: person lost ?" re-seeking", sess["id"])
+        _set_state(sess, "PERSON_SEARCH")
+        return
+
+    # Get center x of bounding box (assuming bbox is [x, y, w, h] and frame width is roughly 640 for HOG/YOLO)
+    x, y, w, h = person["bbox"]
+    center_x = x + (w / 2.0)
+    frame_width = 640.0 # Assumption based on standard config
+    
+    # Classify position
+    margin = frame_width * 0.15 # 15% center margin
+    mid = frame_width / 2.0
+    
+    if center_x < (mid - margin):
+        # LEFT
+        decision = apply_wheel_speeds(-20.0, 20.0, owner="navigation_service", mode=NAVIGATION)
+    elif center_x > (mid + margin):
+        # RIGHT
+        decision = apply_wheel_speeds(20.0, -20.0, owner="navigation_service", mode=NAVIGATION)
+    else:
+        # CENTER
+        decision = apply_wheel_speeds(30.0, 30.0, owner="navigation_service", mode=NAVIGATION)
+
     if not decision.get("applied"):
         _handle_gate_refusal(sess)
     else:
@@ -258,7 +328,16 @@ def _arrived(sess: dict) -> None:
             _session["prev_node"] = hop["name"]
         else:
             final = _session.get("final_target") or hop["name"]
-            _session = None
+            # After final arrival, if search_person flag is set, transition to search.
+            # We assume voice command sets this flag, but we'll default to it here if it's a person search.
+            if _session.get("search_person"):
+                _session["state"] = "PERSON_SEARCH"
+                _session["state_started_at"] = time.time()
+                _session["blocked_since"] = None
+                do_search = True
+            else:
+                _session = None
+                do_search = False
     # Teach the edge we just drove (auto-learning, never raises).
     from services import route_graph
     route_graph.observe_traversal(prev_node, hop["name"])
@@ -266,11 +345,16 @@ def _arrived(sess: dict) -> None:
     from services.motor_service import stop_all
     stop_all("nav_done")
     if advance:
-        logger.info("Nav: hop arrived at '%s' → next hop '%s'",
+        logger.info("Nav: hop arrived at '%s' +' next hop '%s'",
                     hop["name"], nxt["name"])
         _log_event({"event": "hop", "arrived": hop["name"],
                     "next": nxt["name"]})
         return
+    if do_search:
+        logger.info("Nav: ARRIVED at '%s'. Starting PERSON_SEARCH", final)
+        _log_event({"event": "arrived", "target": final, "tag_id": hop["tag_id"]})
+        return
+        
     st = get_robot_state()
     if st.get_mode() == NAVIGATION:
         st.request_mode(STANDBY, requested_by="navigation_service")
@@ -281,7 +365,7 @@ def _arrived(sess: dict) -> None:
 # ── Engine ───────────────────────────────────────────────────────────────────
 
 def _engine_loop() -> None:
-    handlers = {"SEEK": _state_seek, "APPROACH": _state_approach}
+    handlers = {"SEEK": _state_seek, "APPROACH": _state_approach, "PERSON_SEARCH": _state_person_search, "PERSON_APPROACH": _state_person_approach}
     logger.info("Navigation engine started (tick=%.2fs)", ENGINE_TICK_S)
     while not _engine_stop.is_set():
         sess = status()
