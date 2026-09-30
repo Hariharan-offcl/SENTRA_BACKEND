@@ -75,8 +75,7 @@ def app_mode() -> str:
 
 
 def battery_percent() -> float:
-    from services import telemetry_service
-    return float(telemetry_service._sim["battery_level"])
+    return 100.0
 
 
 def current_location_name() -> str | None:
