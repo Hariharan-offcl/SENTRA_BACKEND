@@ -250,8 +250,9 @@ async def _push_loop(ws: WebSocket) -> None:
     last_nav_sig = None
     last_tags_sig = None
     last_persons_sig = None
+    from services import telemetry_service
     while True:
-        await send_event(ws, "telemetry", cm.telemetry_event())
+        await send_event(ws, "telemetry", telemetry_service.get_ws_telemetry_payload())
         now = time.time()
         if now - last_sensors >= 0.5:
             last_sensors = now

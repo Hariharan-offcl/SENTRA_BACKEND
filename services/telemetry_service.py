@@ -226,6 +226,17 @@ def get_ws_telemetry_payload() -> dict:
         "uptime_sec": uptime,
     }
 
+    try:
+        from services import navigation_service
+        nav_state = navigation_service.get_state().get("state", "IDLE")
+    except Exception:
+        nav_state = "IDLE"
+
+    battery_percent = 100.0
+    if not current_block.get("simulated", True) and current_block.get("voltage_v"):
+        v = current_block["voltage_v"]
+        battery_percent = max(0.0, min(100.0, (v - 9.0) / (12.6 - 9.0) * 100.0))
+
     return {
         "type":             "telemetry",
         "timestamp":        round(now, 3),
@@ -239,6 +250,8 @@ def get_ws_telemetry_payload() -> dict:
         "imu":              imu_block,
         "current_sensor":   current_block,
         "system":           system_block,
+        "battery_percent":  round(battery_percent, 1),
+        "navigation_state": nav_state,
     }
 
 
