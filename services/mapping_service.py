@@ -181,12 +181,17 @@ def _context_model() -> dict:
         snap = sensor_service.get_snapshot()
     except Exception:
         snap = {}
-    ultra = snap.get("ultrasonic", {}) or {}
+    try:
+        from services.telemetry_service import _US_SIM
+        front = _US_SIM.get("front_distance_m")
+        rear  = _US_SIM.get("rear_distance_m")
+    except Exception:
+        front = snap.get("front_distance_m")
+        rear  = snap.get("rear_distance_m")
     return {
-        "imu": snap.get("imu", {}) or {},
-        "wheel_encoders": snap.get("wheel_encoders", {}) or {},
-        "front_distance_m": ultra.get("front_distance_m"),
-        "rear_distance_m": ultra.get("rear_distance_m"),
+        "imu":            snap.get("imu", {}) or {},
+        "front_distance_m": front,
+        "rear_distance_m":  rear,
     }
 
 
@@ -336,12 +341,16 @@ def on_frame(frame, frame_id: str = "") -> None:
 # ── Trace recording (async, started from lifespan) ───────────────────────────
 
 def _telemetry() -> tuple[float, float, str]:
-    """(battery_pct, current_ma, health) — _sim uses flat top-level keys."""
+    """(battery_pct, current_ma, health) — pulled from real service layer."""
     try:
-        from services.telemetry_service import _sim
-        battery = float(_sim.get("battery_level", 0.0))
-        current = float(_sim.get("current_ma", 0.0))
-        return battery, current, "LOW_BATTERY" if battery < 20 else "OK"
+        from services import current_service
+        prov = current_service.sensor_provider()
+        curr_data = prov.get("current", {})
+        current_ma = float(curr_data.get("current", 0.0) or 0.0)
+        # We don't have a battery gauge sensor; report 0 until one is wired.
+        battery = 0.0
+        health = "OK" if current_ma < 3000 else "OVERCURRENT"
+        return battery, current_ma, health
     except Exception:
         return 0.0, 0.0, "UNKNOWN"
 

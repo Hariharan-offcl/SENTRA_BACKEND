@@ -196,15 +196,23 @@ async def _push_loop(ws: WebSocket) -> None:
 
 # ── Connection lifecycle ─────────────────────────────────────────────────────
 
+def _flat_inbound(raw: str) -> tuple[str, dict]:
+    msg = json.loads(raw)
+    if not isinstance(msg, dict):
+        return "", {}
+    if "type" in msg:
+        return str(msg["type"]), {k: v for k, v in msg.items() if k != "type"}
+    if "event" in msg:
+        return str(msg["event"]), dict(msg.get("data") or {})
+    return "", {}
+
 async def _recv_loop(ws: WebSocket) -> None:
     while True:
         raw = await ws.receive_text()
         try:
-            msg = json.loads(raw)
+            event, data = _flat_inbound(raw)
         except json.JSONDecodeError:
             continue
-        event = str(msg.get("event", ""))
-        data = msg.get("data") or {}
 
         if event == "ping":
             await send_event(ws, "pong", {})
@@ -224,47 +232,4 @@ async def _recv_loop(ws: WebSocket) -> None:
             logger.debug("compat WS unknown event: %s", event)
 
 
-@router.websocket("/ws")
-async def compat_ws_endpoint(websocket: WebSocket):
-    token = websocket.query_params.get("token", "").strip()
-    ctx = None
-    if core_auth.AUTH_ENFORCED:
-        if token:
-            try:
-                ctx = core_auth.verify_token(token)
-            except Exception as exc:
-                await websocket.accept()
-                await websocket.close(code=4401)
-                logger.info("compat WS denied (bad token): %s", exc)
-                return
-        else:
-            await websocket.accept()
-            await websocket.close(code=4401)
-            logger.info("compat WS denied (missing token)")
-            return
-    else:
-        ctx = core_auth.AuthContext(device_id="anon", role="GUEST",
-                                    permissions=[], kind="user", jti="-")
-
-    await connection_manager.connect(websocket, role="USER", user_id=ctx.device_id)
-    _clients.add(websocket)
-    logger.info("App compat WS connected (%s) total=%d",
-                ctx.device_id, len(connection_manager.active_connections))
-
-    pusher = asyncio.create_task(_push_loop(websocket))
-    try:
-        await _recv_loop(websocket)
-    except WebSocketDisconnect:
-        pass
-    except Exception as exc:
-        logger.error("compat WS error: %s", exc)
-    finally:
-        pusher.cancel()
-        _clients.discard(websocket)
-        connection_manager.disconnect(websocket)
-        # Safety: this client may have been driving.
-        from services.motion_controller import get_motion_controller
-        mc = get_motion_controller()
-        mc.stop("app_compat_ws")
-        motor_service.stop_all("app_compat_ws_disconnect")
-        logger.info("App compat WS disconnected total=%d", len(connection_manager.active_connections))
+# Endpoint removed to avoid duplication with app_ws.py

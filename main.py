@@ -46,7 +46,6 @@ from routers import route_graph as route_graph_router  # Phase 5: taught route g
 # WebSocket handlers
 from ws_handlers import telemetry_ws, control_ws, alerts_ws, call_ws
 from ws_handlers import compat_ws  # Phase 21: multiplexed app socket
-from ws_handlers import app_ws  # Phase 1 contract: /ws/user + /ws/rover
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -169,6 +168,43 @@ async def lifespan(app: FastAPI):
     # is subscribed again — remove this block only if the mapping feature is
     # intentionally dropped.
     vision_service.subscribe(mapping_service.on_frame, name="mapping")
+
+    # ── Localization callback: push WS event on confirmed location change ──
+    from services import localization_service
+    from services.connection_manager import connection_manager
+    import json as _json
+
+    def _on_location_confirmed(loc: dict) -> None:
+        """Broadcast apriltag_detected and localization_update to all clients."""
+        event_payload = _json.dumps({
+            "type": "apriltag_detected",
+            "tag_id":      loc.get("tag_id"),
+            "name":        loc.get("name"),
+            "type_":       loc.get("type"),
+            "distance_m":  loc.get("distance_m"),
+            "bearing_deg": loc.get("bearing_deg"),
+            "confidence":  loc.get("confidence"),
+            "seen_at":     loc.get("seen_at"),
+        })
+        loc_payload = _json.dumps({
+            "type":             "localization_update",
+            "current_location": loc.get("name"),
+            "tag_id":           loc.get("tag_id"),
+            "tag_type":         loc.get("type"),
+            "distance_m":       loc.get("distance_m"),
+            "confidence":       loc.get("confidence"),
+        })
+        try:
+            for ws in connection_manager.active_connections:
+                import asyncio
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(ws.send_text(event_payload))
+                    asyncio.ensure_future(ws.send_text(loc_payload))
+        except Exception as _e:
+            logger.debug("localization WS broadcast error: %s", _e)
+
+    localization_service.on_location_change(_on_location_confirmed)
 
     # ── Phase 10: person detection (phone frames → tracked persons) ────
     from services import person_detection
@@ -319,8 +355,8 @@ app.include_router(telemetry_ws.router)
 app.include_router(control_ws.router)
 app.include_router(alerts_ws.router)
 app.include_router(call_ws.router)
-app.include_router(compat_ws.router)  # Phase 21: /ws multiplexed app socket
 app.include_router(app_ws.router)  # Phase 1 contract: /ws/user + /ws/rover
+
 
 # ── Static file serving (snapshots download) ──────────────────────────────────
 _snapshot_dir = settings.camera_snapshot_dir

@@ -104,16 +104,9 @@ def _poll_loop() -> None:
     while not _stop_event.is_set():
         left, right = _read_once()
         with _lock:
-            _state["left_cliff"] = left
+            _state["left_cliff"]  = left
             _state["right_cliff"] = right
-            _state["last_read"] = time.time()
-        # Mirror into the unified telemetry state (WS telemetry shows live values)
-        try:
-            from services.telemetry_service import _sim
-            _sim["cliff"]["left_detected"] = left
-            _sim["cliff"]["right_detected"] = right
-        except Exception:
-            pass
+            _state["last_read"]   = time.time()
         _stop_event.wait(POLL_INTERVAL_S)
 
 

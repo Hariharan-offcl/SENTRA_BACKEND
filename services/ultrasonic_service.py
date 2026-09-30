@@ -72,19 +72,20 @@ def measure_distance(trig, echo):
         return MAX_DIST
 
 def _ultrasonic_loop():
-    from services.telemetry_service import _sim
+    # Write directly into the canonical telemetry state so the assembler
+    # always sees the most recent HC-SR04 readings.
+    from services.telemetry_service import _US_SIM
     while True:
         if _h is not None:
             front = measure_distance(FRONT_TRIG, FRONT_ECHO)
-            time.sleep(0.05) # Prevent signal overlap
-            rear = measure_distance(REAR_TRIG, REAR_ECHO)
-            
-            # Update the global telemetry state
-            _sim["ultrasonic"]["front_distance_m"] = round(front, 2)
-            _sim["ultrasonic"]["rear_distance_m"] = round(rear, 2)
-            _sim["ultrasonic"]["last_read"] = time.time()
-            
-        time.sleep(0.2) # Update 5 times a second
+            time.sleep(0.05)   # prevent signal overlap between sensors
+            rear  = measure_distance(REAR_TRIG, REAR_ECHO)
+
+            _US_SIM["front_distance_m"] = round(front, 2)
+            _US_SIM["rear_distance_m"]  = round(rear,  2)
+            _US_SIM["last_read"]        = time.time()
+
+        time.sleep(0.2)   # 5 Hz update rate
 
 def start_monitoring():
     _init_hardware()

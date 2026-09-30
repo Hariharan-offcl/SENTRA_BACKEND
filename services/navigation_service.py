@@ -207,7 +207,7 @@ def _state_approach(sess: dict) -> None:
         return
     det = _latest_detection(sess["tag_id"], max_age_s=core_config.DOCK_TAG_LOST_GRACE_S)
     if det is None:
-        logger.warning("Nav %s: tag lost ?" re-seeking", sess["id"])
+        logger.warning("Nav %s: tag lost -> re-seeking", sess["id"])
         _set_state(sess, "SEEK")
         return
 
@@ -248,8 +248,8 @@ def _state_person_search(sess: dict) -> None:
 
     person = _get_tracked_person()
     if person is not None and person["age_s"] < 1.0:
-        logger.info("Nav %s: Person detected, transitioning to PERSON_APPROACH", sess["id"])
-        _set_state(sess, "PERSON_APPROACH")
+        logger.info("Nav %s: Person detected, transitioning to CENTER_PERSON", sess["id"])
+        _set_state(sess, "CENTER_PERSON")
         return
 
     # Slowly rotate to search
@@ -259,44 +259,99 @@ def _state_person_search(sess: dict) -> None:
         _handle_gate_refusal(sess)
 
 
-def _state_person_approach(sess: dict) -> None:
+def _state_center_person(sess: dict) -> None:
     from services.motor_service import apply_wheel_speeds
     if time.time() - sess["state_started_at"] > core_config.NAV_APPROACH_TIMEOUT_S:
-        logger.warning("Nav %s: person approach timed out", sess["id"])
-        cancel("person_approach_timeout")
+        logger.warning("Nav %s: center person timed out", sess["id"])
+        cancel("center_person_timeout")
         return
 
     person = _get_tracked_person()
     if person is None or person["age_s"] > 2.0:
-        logger.warning("Nav %s: person lost ?" re-seeking", sess["id"])
+        logger.warning("Nav %s: person lost -> re-seeking", sess["id"])
+        from services.motor_service import stop_all
+        stop_all("person_lost")
         _set_state(sess, "PERSON_SEARCH")
         return
 
-    # Get center x of bounding box (assuming bbox is [x, y, w, h] and frame width is roughly 640 for HOG/YOLO)
     x, y, w, h = person["bbox"]
     center_x = x + (w / 2.0)
-    frame_width = 640.0 # Assumption based on standard config
-    
-    # Classify position
-    margin = frame_width * 0.15 # 15% center margin
+    frame_width = 640.0
+    margin = frame_width * 0.15
     mid = frame_width / 2.0
-    
-    if center_x < (mid - margin):
-        # LEFT
-        decision = apply_wheel_speeds(-20.0, 20.0, owner="navigation_service", mode=NAVIGATION)
-    elif center_x > (mid + margin):
-        # RIGHT
-        decision = apply_wheel_speeds(20.0, -20.0, owner="navigation_service", mode=NAVIGATION)
-    else:
-        # CENTER
-        decision = apply_wheel_speeds(30.0, 30.0, owner="navigation_service", mode=NAVIGATION)
 
+    if center_x < (mid - margin):
+        # LEFT -> rotate left
+        decision = apply_wheel_speeds(-20.0, 20.0, owner="navigation_service", mode=NAVIGATION)
+        if not decision.get("applied"):
+            _handle_gate_refusal(sess)
+    elif center_x > (mid + margin):
+        # RIGHT -> rotate right
+        decision = apply_wheel_speeds(20.0, -20.0, owner="navigation_service", mode=NAVIGATION)
+        if not decision.get("applied"):
+            _handle_gate_refusal(sess)
+    else:
+        # CENTER -> stop rotation, proceed to APPROACH
+        from services.motor_service import stop_all
+        stop_all("center_achieved")
+        _set_state(sess, "APPROACH_PERSON")
+
+
+def _state_approach_person(sess: dict) -> None:
+    from services.motor_service import apply_wheel_speeds, stop_all
+    if time.time() - sess["state_started_at"] > core_config.NAV_APPROACH_TIMEOUT_S:
+        logger.warning("Nav %s: approach person timed out", sess["id"])
+        cancel("approach_person_timeout")
+        return
+
+    person = _get_tracked_person()
+    if person is None or person["age_s"] > 2.0:
+        logger.warning("Nav %s: person lost -> stopping and re-seeking", sess["id"])
+        stop_all("person_lost")
+        _set_state(sess, "PERSON_SEARCH")
+        return
+
+    from core.safety import get_safety_layer
+    sensors = get_safety_layer().read_sensors()
+    front = sensors.get("front_distance_m")
+
+    # Stop when safe distance is reached
+    safe_dist = core_config.FRONT_OBSTACLE_STOP_M + 0.15
+    if front is not None and front <= safe_dist:
+        _set_state(sess, "PERSON_REACHED")
+        return
+
+    # Check centering drift, if they moved horizontally, go back to centering
+    x, y, w, h = person["bbox"]
+    center_x = x + (w / 2.0)
+    frame_width = 640.0
+    margin = frame_width * 0.25 # Slightly looser margin while moving forward
+    mid = frame_width / 2.0
+    if center_x < (mid - margin) or center_x > (mid + margin):
+        stop_all("person_drifted")
+        _set_state(sess, "CENTER_PERSON")
+        return
+
+    # Move forward only when safe
+    decision = apply_wheel_speeds(30.0, 30.0, owner="navigation_service", mode=NAVIGATION)
     if not decision.get("applied"):
         _handle_gate_refusal(sess)
-    else:
-        with _lock:
-            if _session and _session["id"] == sess["id"]:
-                _session["blocked_since"] = None
+
+
+def _state_person_reached(sess: dict) -> None:
+    from services.motor_service import stop_all
+    stop_all("person_reached")
+    logger.info("Nav %s: Person reached successfully.", sess["id"])
+    _log_event({"event": "person_reached", "target": sess.get("target")})
+    
+    st = get_robot_state()
+    if st.get_mode() == NAVIGATION:
+        st.request_mode(STANDBY, requested_by="navigation_service")
+        
+    global _session
+    with _lock:
+        if _session and _session["id"] == sess["id"]:
+            _session = None
 
 
 def _arrived(sess: dict) -> None:
@@ -365,7 +420,14 @@ def _arrived(sess: dict) -> None:
 # ── Engine ───────────────────────────────────────────────────────────────────
 
 def _engine_loop() -> None:
-    handlers = {"SEEK": _state_seek, "APPROACH": _state_approach, "PERSON_SEARCH": _state_person_search, "PERSON_APPROACH": _state_person_approach}
+    handlers = {
+        "SEEK": _state_seek, 
+        "APPROACH": _state_approach, 
+        "PERSON_SEARCH": _state_person_search, 
+        "CENTER_PERSON": _state_center_person,
+        "APPROACH_PERSON": _state_approach_person,
+        "PERSON_REACHED": _state_person_reached
+    }
     logger.info("Navigation engine started (tick=%.2fs)", ENGINE_TICK_S)
     while not _engine_stop.is_set():
         sess = status()

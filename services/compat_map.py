@@ -264,26 +264,43 @@ _NAV_STATE_TO_APP = {
 
 def navigation_event() -> dict:
     """App spec §8 navigation_status from nav / patrol / dock sessions."""
-    app = {"status": "idle", "current_location": current_location_name(),
-           "next_waypoint": None, "progress_percent": 0.0}
-
-    from services import navigation_service
-    nav = navigation_service.status()
-    if nav:
-        app["status"] = _NAV_STATE_TO_APP.get(nav.get("state", ""), "moving")
-        app["next_waypoint"] = nav.get("target")
-        return app
+    app = {
+        "status": "idle",
+        "current_location": current_location_name(),
+        "target_location": None,
+        "next_waypoint": None,
+        "progress_percent": 0.0,
+        "obstacle_state": "CLEAR",
+        "patrol_state": "IDLE",
+        "waypoint_index": 0,
+        "waypoint_count": 0,
+    }
 
     from services import patrol_service
     ps = patrol_service.status()
     sess = ps.get("session")
     if ps.get("active") and sess:
+        app["patrol_state"] = "PAUSED" if sess.get("paused") else "RUNNING"
         wps = sess.get("waypoints") or []
         idx = sess.get("index", 0)
-        app["status"] = "blocked" if sess.get("blocked") else "moving"
+        app["waypoint_index"] = idx
+        app["waypoint_count"] = len(wps)
+        app["progress_percent"] = round(100.0 * idx / len(wps), 1) if wps else 0.0
         app["next_waypoint"] = sess.get("current_waypoint") or (
             wps[idx] if idx < len(wps) else None)
-        app["progress_percent"] = round(100.0 * idx / len(wps), 1) if wps else 0.0
+        app["target_location"] = app["next_waypoint"]
+
+    from services import navigation_service
+    nav = navigation_service.status()
+    if nav:
+        app["status"] = _NAV_STATE_TO_APP.get(nav.get("state", ""), "moving")
+        if nav.get("target"):
+            app["next_waypoint"] = nav.get("target")
+        app["target_location"] = nav.get("final_target") or app["next_waypoint"]
+        return app
+
+    if ps.get("active") and sess:
+        app["status"] = "blocked" if sess.get("blocked") else "moving"
         return app
 
     from services import docking_service

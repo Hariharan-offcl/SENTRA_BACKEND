@@ -174,10 +174,9 @@ def _log_event(detail: dict, severity: str = "INFO") -> None:
 
 
 def _engine_loop() -> None:
-    """Cruise engine: drives the CURRENT session's route. One thread serves
-    sequential sessions; it idles when no session is active."""
-    from services.motor_service import apply_wheel_speeds, stop_all
-    from services import apriltag_service
+    """Cruise engine: orchestrates navigation_service to drive the route."""
+    from services.motor_service import stop_all
+    from services import navigation_service, localization_service
 
     logger.info("Patrol engine started (tick=%.2fs)", ENGINE_TICK_S)
     while not _engine_stop.is_set():
@@ -189,30 +188,32 @@ def _engine_loop() -> None:
         st = get_robot_state()
         route_name = session["route"]
         waypoints = session["waypoints"]
+        from core.state import NAVIGATION
 
-        # Phase 5 (P10): PAUSED holds the session and its index with the
-        # motors stopped (stop_all fired once in pause_patrol()). E-stop or a
-        # mode takeover still ends the session — safety always wins over pause.
+        # PAUSE logic
         if session.get("paused"):
-            if st.is_estop_active() or st.get_mode() not in (PATROL,):
+            if st.is_estop_active() or st.get_mode() not in (PATROL, NAVIGATION):
                 reason = "estop" if st.is_estop_active() else f"mode_changed_to_{st.get_mode()}"
-                stop_all("patrol_engine")
                 _end_session(reason)
                 continue
+            if st.get_mode() == NAVIGATION:
+                navigation_service.cancel("patrol_paused")
             _engine_stop.wait(ENGINE_TICK_S)
             continue
 
         # Respect e-stop / manual takeover → end session
-        if st.is_estop_active() or st.get_mode() not in (PATROL,):
+        if st.is_estop_active() or st.get_mode() not in (PATROL, NAVIGATION):
             reason = "estop" if st.is_estop_active() else f"mode_changed_to_{st.get_mode()}"
             logger.info("Patrol %s ending: %s", route_name, reason)
-            stop_all("patrol_engine")
+            if st.get_mode() == NAVIGATION:
+                navigation_service.cancel("patrol_cancelled")
             _end_session(reason)
             continue
 
         idx = session["index"]
         if idx >= len(waypoints):
-            stop_all("patrol_engine")
+            if st.get_mode() == NAVIGATION:
+                navigation_service.cancel("patrol_completed")
             logger.info("Patrol %s completed all waypoints", route_name)
             _log_event({"event": "completed", "route": route_name}, "INFO")
             _end_session("completed")
@@ -221,74 +222,70 @@ def _engine_loop() -> None:
         wp_name = waypoints[idx]
         wp_tag = _resolve_waypoint(wp_name)
 
-        # 1) Waypoint confirmation via AprilTag freshness window
-        confirmed = False
-        if wp_tag is not None:
-            last = apriltag_service.get_last_seen(wp_tag)
-            if last and (time.time() - last["timestamp"]) <= core_config.PATROL_CONFIRM_FRESH_S:
-                confirmed = True
+        nav_sess = navigation_service.status()
 
-        if confirmed:
-            logger.info("Patrol %s: waypoint '%s' confirmed (tag %d)",
-                        route_name, wp_name, wp_tag)
-            _log_event({"event": "waypoint", "route": route_name,
-                        "waypoint": wp_name, "tag_id": wp_tag, "status": "confirmed"})
+        # Are we there?
+        if localization_service.is_at(wp_name):
+            logger.info("Patrol %s: waypoint '%s' confirmed (tag %s)", route_name, wp_name, wp_tag)
+            _log_event({"event": "waypoint", "route": route_name, "waypoint": wp_name, "tag_id": wp_tag, "status": "confirmed"})
             with _lock:
                 if _session and _session["id"] == session["id"]:
                     _session["index"] = idx + 1
                     _session["waypoint_started_at"] = time.time()
                     _session["confirmed_waypoints"].append(wp_name)
-            _engine_stop.wait(0.8)  # brief pause at the waypoint
+                    _session["blocked"] = False
+                    _session["blocked_since"] = None
+            if nav_sess:
+                navigation_service.cancel("arrived")
+            if st.get_mode() != PATROL:
+                st.request_mode(PATROL, requested_by="patrol_service")
+            _engine_stop.wait(2.0)  # pause at the waypoint before continuing
             continue
 
-        # 2) Timeout guard for this waypoint
+        # Timeout guard for this waypoint
         if time.time() - session["waypoint_started_at"] > core_config.PATROL_WAYPOINT_TIMEOUT_S:
-            logger.warning("Patrol %s: waypoint '%s' TIMED OUT — skipping",
-                           route_name, wp_name)
-            _log_event({"event": "waypoint", "route": route_name, "waypoint": wp_name,
-                        "status": "timeout"}, severity="WARNING")
+            logger.warning("Patrol %s: waypoint '%s' TIMED OUT — skipping", route_name, wp_name)
+            _log_event({"event": "waypoint", "route": route_name, "waypoint": wp_name, "status": "timeout"}, severity="WARNING")
             with _lock:
                 if _session and _session["id"] == session["id"]:
                     _session["index"] = idx + 1
                     _session["waypoint_started_at"] = time.time()
                     _session["skipped_waypoints"].append(wp_name)
-            continue
-
-        # 3) Path check — STOP FIRST on obstacle/cliff, wait, resume on clear
-        sensors = get_safety_layer_sensors()
-        clear, why = _path_is_clear(sensors)
-        if not clear:
-            if not session["blocked"]:
-                logger.warning("Patrol %s: BLOCKED at '%s' (%s) — stopping and waiting",
-                               route_name, wp_name, why)
-                _log_event({"event": "blocked", "route": route_name,
-                            "waypoint": wp_name, "reason": why}, severity="WARNING")
-                with _lock:
-                    if _session and _session["id"] == session["id"]:
-                        _session["blocked"] = True
-                        _session["blocked_since"] = time.time()
-            stop_all("patrol_engine")
-            _engine_stop.wait(core_config.PATROL_BLOCK_POLL_S)
-            continue
-
-        if session["blocked"]:
-            with _lock:
-                if _session and _session["id"] == session["id"]:
                     _session["blocked"] = False
-                    _session["blocked_since"] = None
-            logger.info("Patrol %s: path clear again — resuming '%s'", route_name, wp_name)
+            if nav_sess:
+                navigation_service.cancel("timeout")
+            continue
 
-        # 4) Cruise forward through the safety gate
-        duty = core_config.PATROL_CRUISE_DUTY
-        decision = apply_wheel_speeds(duty, duty, owner="patrol_service", mode=PATROL)
-        if decision.get("applied"):
+        # Start navigation if it's not running
+        if not nav_sess:
+            if st.get_mode() in (STANDBY, PATROL):
+                logger.info("Patrol delegating leg to navigation_service: go to %s (tag %s)", wp_name, wp_tag)
+                if wp_tag is None:
+                    # Target is completely unknown/removed, skip it
+                    logger.warning("Patrol skipping unknown target '%s'", wp_name)
+                    with _lock:
+                        if _session and _session["id"] == session["id"]:
+                            _session["index"] = idx + 1
+                            _session["waypoint_started_at"] = time.time()
+                            _session["skipped_waypoints"].append(wp_name)
+                    continue
+
+                res = navigation_service.go_to(wp_tag, wp_name, source="patrol")
+                if not res.get("ok"):
+                    logger.error("Patrol failed to start navigation: %s", res)
+                    _end_session(f"navigation_failed: {res.get('error')}")
+                    continue
+        else:
+            # Navigation is running, mirror its blocked state
+            nav_state = nav_sess.get("state")
+            blocked = (nav_state == "BLOCKED" or nav_state == "FAILED")
             with _lock:
                 if _session and _session["id"] == session["id"]:
-                    _session["last_decision"] = decision
-        else:
-            # Gate refused (obstacle between polls / mode mismatch) — stop, wait
-            stop_all("patrol_engine")
-            _engine_stop.wait(core_config.PATROL_BLOCK_POLL_S)
+                    _session["blocked"] = blocked
+                    if blocked and not _session.get("blocked_since"):
+                        _session["blocked_since"] = time.time()
+                    elif not blocked:
+                        _session["blocked_since"] = None
 
         _engine_stop.wait(ENGINE_TICK_S)
 

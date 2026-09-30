@@ -139,6 +139,17 @@ def process_frame(frame, frame_id: str = "", source: str = "phone") -> list[dict
             _last_by_tag[det["tag_id"]] = det
         _frame_results.append({"frame_id": frame_id, "timestamp": now,
                                "results": results})
+
+    # Feed each detection into the stability-filtered localization service.
+    # This is non-throwing so a localization error never kills the vision pipe.
+    if results:
+        try:
+            from services import localization_service
+            best = max(results, key=lambda d: d.get("confidence") or 0)
+            localization_service.update(best)
+        except Exception as _loc_exc:
+            logger.debug("localization update error: %s", _loc_exc)
+
     return results
 
 
@@ -174,6 +185,12 @@ def inject_detection(tag_id: int, distance_m: float | None = None,
     with _lock:
         _history.append(det)
         _last_by_tag[det["tag_id"]] = det
+    # Feed injected simulation detections into localization filter too
+    try:
+        from services import localization_service
+        localization_service.update(det)
+    except Exception:
+        pass
     return det
 
 

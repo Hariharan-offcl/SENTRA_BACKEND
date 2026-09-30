@@ -61,26 +61,25 @@ def _health_of(*, enabled: bool, simulated: bool, last_read: float | None) -> di
 def _build_once() -> None:
     """Assemble the unified snapshot from the per-sensor services (their
     daemon threads own the hardware reads; this aggregator never blocks).
-    Distances come from the telemetry ultrasonic state, which the HAL path
-    keeps updated when real hardware is present."""
+    Distances come from telemetry_service._US_SIM, kept current by the
+    ultrasonic service loop."""
     from services import cliff_service, current_service, imu_service
-    from services.telemetry_service import _sim
+    from services.telemetry_service import _US_SIM
 
-    ultra = _sim.get("ultrasonic", {})
-    ultra_last = ultra.get("last_read", 0.0)
+    ultra_last = _US_SIM.get("last_read", 0.0)
 
     cliff_frag = cliff_service.sensor_provider()
-    curr_frag = current_service.sensor_provider()
-    imu_frag = imu_service.sensor_provider()
+    curr_frag  = current_service.sensor_provider()
+    imu_frag   = imu_service.sensor_provider()
 
     snap = {
-        "front_distance_m": ultra.get("front_distance_m"),
-        "rear_distance_m": ultra.get("rear_distance_m"),
-        "left_cliff": bool(cliff_frag["left_cliff"]),
-        "right_cliff": bool(cliff_frag["right_cliff"]),
-        "imu": imu_frag["imu"],
-        "current": curr_frag["current"],
-        "timestamp": time.time(),
+        "front_distance_m": _US_SIM.get("front_distance_m"),
+        "rear_distance_m":  _US_SIM.get("rear_distance_m"),
+        "left_cliff":       bool(cliff_frag["left_cliff"]),
+        "right_cliff":      bool(cliff_frag["right_cliff"]),
+        "imu":              imu_frag["imu"],
+        "current":          curr_frag["current"],
+        "timestamp":        time.time(),
     }
 
     health = {
@@ -145,18 +144,18 @@ def sensor_provider() -> dict:
     the safety gate is never without data (e.g. during startup)."""
     snap = get_snapshot()
     if snap["timestamp"] == 0.0:
-        from services.telemetry_service import _sim
+        from services.telemetry_service import _US_SIM
         from services import cliff_service
         frag = cliff_service.sensor_provider()
         return {
-            "front_distance_m": _sim["ultrasonic"]["front_distance_m"],
-            "rear_distance_m": _sim["ultrasonic"]["rear_distance_m"],
-            "left_cliff": frag["left_cliff"],
-            "right_cliff": frag["right_cliff"],
+            "front_distance_m": _US_SIM["front_distance_m"],
+            "rear_distance_m":  _US_SIM["rear_distance_m"],
+            "left_cliff":       frag["left_cliff"],
+            "right_cliff":      frag["right_cliff"],
         }
     return {
         "front_distance_m": snap["front_distance_m"],
-        "rear_distance_m": snap["rear_distance_m"],
-        "left_cliff": bool(snap["left_cliff"]),
-        "right_cliff": bool(snap["right_cliff"]),
+        "rear_distance_m":  snap["rear_distance_m"],
+        "left_cliff":       bool(snap["left_cliff"]),
+        "right_cliff":      bool(snap["right_cliff"]),
     }

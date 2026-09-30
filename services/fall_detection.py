@@ -156,8 +156,40 @@ def sample(person_id: int, bbox: list, confidence: float,
 
     # Outside the lock: event + hooks (idempotent — confirmed_fired guards)
     if evidence is not None:
+        try:
+            from services import motor_service
+            # Policy: Stop robot immediately on fall to avoid hitting the person
+            motor_service.trigger_estop()
+        except Exception as e:
+            logger.error("Failed to trigger estop on fall: %s", e)
+            
+        try:
+            from services import localization_service
+            loc = localization_service.get_location()
+            if loc:
+                evidence["location"] = loc.get("name")
+                evidence["tag_id"] = loc.get("tag_id")
+        except Exception:
+            pass
+            
+        try:
+            from services import vision_service
+            from services import person_recognition
+            import os
+            import time
+            jpeg = vision_service._latest_node_jpeg()
+            if jpeg:
+                os.makedirs(person_recognition.SNAPSHOT_DIR, exist_ok=True)
+                path = os.path.join(person_recognition.SNAPSHOT_DIR, f"fall_{int(time.time())}.jpg")
+                with open(path, "wb") as f:
+                    f.write(jpeg)
+                evidence["snapshot"] = os.path.basename(path)
+        except Exception as e:
+            logger.error("Failed to save fall snapshot: %s", e)
+
         logger.critical("FALL CONFIRMED for person %d — emergency workflow", person_id)
         try:
+            from services import safety_events
             safety_events.report("FALL", evidence, severity="DANGER")
         except Exception:
             pass
