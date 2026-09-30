@@ -36,7 +36,7 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
         except Exception:
             pass
     peer_role = "user" if role == "node" else "node"
-    allowed_types = {"ready", "offer", "answer", "candidate", "bye"}
+    allowed_types = {"ready", "offer", "answer", "candidate", "bye", "ping"}
 
     try:
         while True:
@@ -47,6 +47,9 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
                 continue
 
             message_type = message.get("type")
+            if message_type == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
             if message_type not in allowed_types:
                 continue
 
