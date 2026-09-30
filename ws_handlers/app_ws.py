@@ -248,12 +248,36 @@ async def _handle_camera_frame(ws: WebSocket, data: dict) -> None:
 async def _push_loop(ws: WebSocket) -> None:
     last_sensors = 0.0
     last_nav_sig = None
+    last_tags_sig = None
+    last_persons_sig = None
     while True:
         await send_event(ws, "telemetry", cm.telemetry_event())
         now = time.time()
         if now - last_sensors >= 0.5:
             last_sensors = now
             await send_event(ws, "sensor_update", cm.sensor_event())
+
+        # apriltag_detected — only on visible-set change (same rule as the
+        # legacy /ws loop; without this the app's vision UI stayed silent).
+        from services import apriltag_service
+        visible = apriltag_service.get_visible()
+        tag_sig = tuple(sorted((d["tag_id"], round(d.get("confidence") or 0, 2))
+                               for d in visible))
+        if tag_sig != last_tags_sig:
+            last_tags_sig = tag_sig
+            for det in visible:
+                await send_event(ws, "apriltag_detected", cm.apriltag_event(det))
+
+        # person_detected — only on tracked-set change
+        from services import person_detection
+        tracks = person_detection.get_tracked()
+        psig = tuple(sorted((t["person_id"], round(t.get("confidence") or 0, 2))
+                            for t in tracks))
+        if psig != last_persons_sig:
+            last_persons_sig = psig
+            for tr in tracks:
+                await send_event(ws, "person_detected", cm.person_event(tr))
+
         nav = cm.navigation_event()
         sig = (nav.get("status"), nav.get("next_waypoint"))
         if sig != last_nav_sig or nav.get("status") not in (None, "idle"):

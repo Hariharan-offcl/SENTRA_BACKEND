@@ -98,7 +98,9 @@ def issue_session(device_id: str, role: str) -> dict:
     permissions = ROLE_PERMISSIONS.get(role)
     if permissions is None:
         raise ValueError("invalid role")
-    dev = device_registry.upsert_device(device_id)
+    # Remember the device's role so refresh-token rotation can re-issue at
+    # the same privilege level instead of dropping OWNER sessions to GUARD.
+    dev = device_registry.upsert_device(device_id, role=role)
     kind = dev.get("kind", "user")
     if dev.get("revoked"):
         raise PermissionError("device is revoked")
@@ -139,10 +141,10 @@ def rotate_session(refresh_token: str) -> dict:
     dev = device_registry.get_device(found["device_id"])
     if dev is None or dev.get("revoked"):
         raise PermissionError("device is revoked")
-    # role defaults to GUARD for rotating devices unless previously OWNER.
-    # (Roles are chosen at login; rotation preserves the device, not the role,
-    # so the app should re-login to change role.)
-    return issue_session(found["device_id"], "GUARD")
+    # Preserve the role the device logged in with (falls back to GUARD for
+    # pre-existing devices that never stored one).
+    role = dev.get("role") if dev.get("role") in ROLE_PERMISSIONS else "GUARD"
+    return issue_session(found["device_id"], role)
 
 
 def check_password(password: str) -> bool:

@@ -81,17 +81,21 @@ def load(path: str | None = None) -> None:
 # ── Devices ──────────────────────────────────────────────────────────────────
 
 def upsert_device(device_id: str, name: str = "", kind: Optional[str] = None,
-                  platform: str = "") -> dict:
+                  platform: str = "", role: Optional[str] = None) -> dict:
     """Register/update a device. Kind: 'node' (rover phone) | 'user'.
     kind=None (the default) never changes an existing device's kind —
     Phase 21 fix: core.auth.issue_session() calls this bare, which used to
-    clobber kind='node' back to 'user' on every token issue."""
+    clobber kind='node' back to 'user' on every token issue.
+    role=None likewise never changes the stored role — issue_session passes
+    it so rotate_session can re-issue with the device's ORIGINAL role instead
+    of downgrading everything to GUARD."""
     now = time.time()
     with _lock:
         d = _devices.get(device_id)
         if d is None:
             d = {"device_id": device_id, "name": name or device_id,
                  "kind": kind if kind in ("node", "user") else "user",
+                 "role": role or "GUEST",
                  "platform": platform, "first_seen": now, "last_seen": now,
                  "revoked": False}
             _devices[device_id] = d
@@ -100,6 +104,8 @@ def upsert_device(device_id: str, name: str = "", kind: Optional[str] = None,
                 d["name"] = name
             if kind in ("node", "user"):
                 d["kind"] = kind
+            if role:
+                d["role"] = role
             if platform:
                 d["platform"] = platform
             d["last_seen"] = now

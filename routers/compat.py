@@ -606,7 +606,15 @@ def get_alert_image(alert_id: str):
             data = f.read()
     except OSError:
         raise HTTPException(status_code=404, detail="snapshot file missing")
-    return _Response(content=data, media_type="image/jpeg")
+    # The app parses {image_b64|image_url} JSON (alert_service.getAlertImage);
+    # raw JPEG bytes were silently dropped by its JSON decode. Wrap in the
+    # envelope it expects.
+    import base64 as _b64
+    return _ok({
+        "alert_id": alert_id,
+        "mime": "image/jpeg",
+        "image_b64": _b64.b64encode(data).decode("ascii"),
+    })
 
 
 @router.api_route("/alerts/{alert_id}/dismiss", methods=["POST", "PATCH"])
@@ -779,16 +787,18 @@ def get_call(call_id: str):
     return _ok(_call_object(_get_call(call_id)))
 
 
-@router.get("/calls/{call_id}")
-def get_call(call_id: str):
-    """Phase 1 contract: call polling for the call screen."""
-    return _ok(_call_object(_get_call(call_id)))
-
-
 @router.post("/calls/{call_id}/accept")
 def call_accept(call_id: str):
     call = _get_call(call_id)
     call["status"] = "active"
+    # Answering from the app also acknowledges any live emergency-call
+    # session — without this the rover kept ringing after the user picked up
+    # (the session only reacted to WebRTC presence, which fires later).
+    try:
+        from services import emergency_call
+        emergency_call.ack("answered via app")
+    except Exception:
+        pass
     return _ok(_call_object(call))
 
 
@@ -796,6 +806,12 @@ def call_accept(call_id: str):
 def call_reject(call_id: str):
     call = _get_call(call_id)
     call["status"] = "missed"
+    # Rejecting stops the emergency ring too (same ack path as accept).
+    try:
+        from services import emergency_call
+        emergency_call.ack("rejected via app")
+    except Exception:
+        pass
     return _ok(_call_object(call))
 
 

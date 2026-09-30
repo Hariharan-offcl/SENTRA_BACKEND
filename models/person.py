@@ -45,10 +45,14 @@ class PersonStatsResponse(BaseModel):
     tracked_count: int
     history_size: int
     min_confidence: float
+    yolo_available: bool = False
+    yolo_model_path: Optional[str] = None
+    yolo_runtime: Optional[str] = None
     avg_detect_ms: Optional[float] = None
     last_detect_ms: Optional[float] = None
     hog_downscale_width: Optional[int] = None
     hog_winstride: Optional[int] = None
+    yolo_input_px: Optional[int] = None
 
 
 class PersonSimulateRequest(BaseModel):

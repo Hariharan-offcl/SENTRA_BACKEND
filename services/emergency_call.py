@@ -245,7 +245,35 @@ def _schedule_broadcast(action: str, session: Optional[dict]) -> None:
 
 async def _broadcast(action: str, session: dict) -> None:
     from ws_handlers.alerts_ws import broadcast_alert
+    payload = _payload(action, session)
     try:
-        await broadcast_alert(_payload(action, session))
+        await broadcast_alert(payload)
     except Exception as exc:
         logger.error("Emergency call broadcast failed: %s", exc)
+
+    # Fan out to the app sockets. The Flutter user phone dials /ws/user only —
+    # it never opens /ws/alerts — so without this the fall invite never rang
+    # anywhere. Map onto the Phase-1 call events the app already parses:
+    #   invite/acknowledged → call_incoming (ring), missed/ended → call_ended.
+    # data.eventId/session_id lets the app correlate; evidence rides along.
+    try:
+        from ws_handlers import compat_ws
+        state = str(session.get("state", ""))
+        if action == "invite":
+            app_event = "call_incoming"            # ring the user's phone
+        elif action == "acknowledged" and state == "ACTIVE":
+            app_event = None                        # live call continues
+        else:
+            app_event = "call_ended"                # missed/ended/ack'd ring
+        if app_event:
+            compat_ws.push_event(app_event, {
+                "id": session["session_id"],
+                "event_id": session["session_id"],
+                "status": session["state"],
+                "reason": session["reason"],
+                "severity": "DANGER",
+                "is_emergency": True,
+                "evidence": session["evidence"],
+            })
+    except Exception as exc:
+        logger.error("Emergency call app-socket fan-out failed: %s", exc)

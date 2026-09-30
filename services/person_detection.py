@@ -10,6 +10,9 @@ Modular detector pipeline on the phone-camera frames (vision hub):
 Detector backends (pluggable — replace later without touching the pipeline):
     "simulation" — inject via POST /person/simulate or inject(); dev/emulator
     "hog"        — OpenCV HOG pedestrian detector (CPU, no extra deps)
+    "yolo"       — YOLOv8n/YOLO11n ONNX export (recommended: far more accurate
+                   at similar CPU cost; runs via onnxruntime when installed,
+                   else through OpenCV's DNN module — no extra dependency)
 
 Outputs per tracked person: person_id, bbox, confidence, timestamp, frame_id.
 Detector failures degrade to "no persons" — never crash the pipeline.
@@ -17,8 +20,18 @@ Every N frames the worker reports a PERSON event to /ws/alerts.
 
 Env vars:
     SENTRA_PERSON_ENABLED     (default true)
-    SENTRA_PERSON_BACKEND     (default auto: auto|hog|simulation — auto picks
-                               hog when OpenCV is importable, else simulation)
+    SENTRA_PERSON_BACKEND     (default auto: auto|yolo|hog|simulation — auto
+                               prefers yolo when the ONNX model + a runtime
+                               exist, else hog, else simulation)
+    SENTRA_PERSON_YOLO_MODEL  (default data/models/yolov8n.onnx — export with
+                               `yolo export model=yolov8n.pt format=onnx
+                               imgsz=320`, then copy to the Pi)
+    SENTRA_PERSON_YOLO_IMGSZ  (default 320 — square input size; 320 is the
+                               Pi 5 sweet spot, 640 for max accuracy)
+    SENTRA_PERSON_YOLO_CONF   (default 0.40 — model confidence cutoff)
+    SENTRA_PERSON_YOLO_NMS    (default 0.45 — NMS IoU threshold)
+    SENTRA_PERSON_YOLO_FALLBACK (default true — degrade to HOG on any YOLO
+                               load/inference failure)
     SENTRA_PERSON_POLL_S      (default 0.1 — worker pull rate)
     SENTRA_PERSON_MAX_AGE_S   (default 1.5 — tracked person considered gone)
     SENTRA_PERSON_MIN_CONF    (default 0.5)
@@ -48,6 +61,12 @@ try:
 except ImportError:
     _CV_OK = False
 
+try:
+    import onnxruntime as _ort
+    _ORT_OK = True
+except ImportError:
+    _ORT_OK = False
+
 from services import safety_events
 
 PERSON_ENABLED = os.getenv("SENTRA_PERSON_ENABLED", "true").strip().lower() in (
@@ -64,6 +83,19 @@ EVENT_EVERY = int(os.getenv("SENTRA_PERSON_EVENT_EVERY", "3"))
 HOG_DOWNSCALE_W = max(160, int(os.getenv("SENTRA_PERSON_HOG_WIDTH", "640")))
 HOG_WINSTRIDE = max(2, int(os.getenv("SENTRA_PERSON_HOG_WINSTRIDE", "8")))
 HOG_SCALE = max(1.01, float(os.getenv("SENTRA_PERSON_HOG_SCALE", "1.05")))
+
+# YOLO backend tuning. Model path is resolved relative to the backend root
+# when given as a relative path, so the service's cwd doesn't matter.
+_BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+YOLO_MODEL_PATH = os.path.join(
+    _BACKEND_ROOT,
+    os.getenv("SENTRA_PERSON_YOLO_MODEL",
+              os.path.join("data", "models", "yolov8n.onnx")))
+YOLO_INPUT_PX = max(160, int(os.getenv("SENTRA_PERSON_YOLO_IMGSZ", "320")))
+YOLO_CONF = float(os.getenv("SENTRA_PERSON_YOLO_CONF", "0.40"))
+YOLO_NMS_IOU = float(os.getenv("SENTRA_PERSON_YOLO_NMS", "0.45"))
+YOLO_FALLBACK_TO_HOG = os.getenv("SENTRA_PERSON_YOLO_FALLBACK", "true").strip().lower() in (
+    "1", "true", "yes", "on")
 
 HISTORY_MAX = 100
 QUEUE_MAX = 1  # worker processes the newest frame only
@@ -148,7 +180,139 @@ def _detect_simulation(frame) -> list[dict]:
     return []
 
 
-_BACKENDS = {"hog": _detect_hog, "simulation": _detect_simulation}
+# ── YOLO backend (recommended over HOG) ──────────────────────────────────────
+
+_yolo_sess = None                    # onnxruntime InferenceSession
+_yolo_net = None                     # cv2.dnn.Net
+_yolo_runtime: Optional[str] = None  # "onnxruntime" | "cv2.dnn" | None
+_yolo_load_tried = False
+
+
+def _yolo_runtime_name() -> Optional[str]:
+    if _ORT_OK:
+        return "onnxruntime"
+    if _CV_OK:
+        return "cv2.dnn"
+    return None
+
+
+def _yolo_model_available() -> bool:
+    try:
+        return os.path.isfile(YOLO_MODEL_PATH)
+    except Exception:
+        return False
+
+
+def yolo_available() -> bool:
+    """True when the ONNX model exists and a runtime can run it."""
+    return _yolo_model_available() and _yolo_runtime_name() is not None
+
+
+def _load_yolo() -> None:
+    """Lazy, once. On any failure the YOLO backend is disabled and callers
+    degrade (auto/hog fallback)."""
+    global _yolo_sess, _yolo_net, _yolo_runtime, _yolo_load_tried
+    if _yolo_load_tried:
+        return
+    _yolo_load_tried = True
+    if not _yolo_model_available():
+        logger.info("YOLO model not found at %s — yolo backend disabled "
+                    "(export with: yolo export model=yolov8n.pt format=onnx "
+                    "imgsz=320)", YOLO_MODEL_PATH)
+        return
+    try:
+        if _ORT_OK:
+            _yolo_sess = _ort.InferenceSession(
+                YOLO_MODEL_PATH, providers=["CPUExecutionProvider"])
+            _yolo_runtime = "onnxruntime"
+        elif _CV_OK:
+            _yolo_net = cv2.dnn.readNetFromONNX(YOLO_MODEL_PATH)
+            _yolo_runtime = "cv2.dnn"
+    except Exception as exc:
+        _yolo_sess, _yolo_net, _yolo_runtime = None, None, None
+        logger.warning("YOLO load failed (%s) — falling back to HOG", exc)
+
+
+def _letterbox(frame, w: int, h: int):
+    """Aspect-preserving resize + gray padding (YOLO convention). Returns
+    (canvas, scale, pad_x, pad_y) so boxes can be mapped back exactly —
+    fall evidence reads bbox aspect ratios, so stretching is not an option."""
+    ih, iw = frame.shape[:2]
+    scale = min(w / iw, h / ih)
+    nw, nh = max(1, int(iw * scale)), max(1, int(ih * scale))
+    resized = cv2.resize(frame, (nw, nh))
+    canvas = np.full((h, w, 3), 114, dtype=np.uint8)
+    dx, dy = (w - nw) // 2, (h - nh) // 2
+    canvas[dy:dy + nh, dx:dx + nw] = resized
+    return canvas, scale, dx, dy
+
+
+def _detect_yolo(frame) -> list[dict]:
+    """YOLO ONNX person detection (class 0 only). Letterboxes to a square
+    YOLO_INPUT_PX input and decodes boxes back into original frame coords.
+    Output layout matches ultralytics ONNX export: (1, 4+num_classes, N),
+    center-format boxes, per-class scores, no objectness row. Any failure
+    degrades to HOG when SENTRA_PERSON_YOLO_FALLBACK is enabled."""
+    global _backend_status
+    _load_yolo()
+    if _yolo_runtime is None:
+        return _detect_hog(frame) if YOLO_FALLBACK_TO_HOG else []
+    try:
+        canvas, scale, dx, dy = _letterbox(frame, YOLO_INPUT_PX, YOLO_INPUT_PX)
+        blob = cv2.dnn.blobFromImage(canvas, 1.0 / 255.0,
+                                     (YOLO_INPUT_PX, YOLO_INPUT_PX),
+                                     swapRB=True, crop=False)
+        if _yolo_runtime == "onnxruntime":
+            feeds = {i.name: blob for i in _yolo_sess.get_inputs()}
+            out = _yolo_sess.run(None, feeds)[0]
+        else:
+            _yolo_net.setInput(blob)
+            out = _yolo_net.forward()
+        preds = np.asarray(out)[0]           # (84, N)
+        if preds.ndim != 2 or preds.shape[0] < 5:
+            raise ValueError(f"unexpected YOLO output shape {out.shape}")
+        preds = preds.T                      # (N, 84)
+        boxes_xywh = preds[:, :4]
+        scores = preds[:, 4:]
+        cls_ids = scores.argmax(axis=1)
+        confs = scores.max(axis=1)
+
+        conf_floor = max(YOLO_CONF, MIN_CONF)
+        cands: list[tuple[list[int], float]] = []
+        for (cx, cy, bw, bh), cid, conf in zip(boxes_xywh, cls_ids, confs):
+            if int(cid) != 0:                # class 0 = person
+                continue
+            if conf < conf_floor:
+                continue
+            x = (float(cx) - float(bw) / 2.0 - dx) / scale
+            y = (float(cy) - float(bh) / 2.0 - dy) / scale
+            w = float(bw) / scale
+            h = float(bh) / scale
+            if w <= 1 or h <= 1:
+                continue
+            cands.append(([int(x), int(y), int(w), int(h)], float(conf)))
+
+        if not cands:
+            _backend_status = "yolo"
+            return []
+        keep = cv2.dnn.NMSBoxes([b for b, _ in cands], [c for _, c in cands],
+                                YOLO_CONF, YOLO_NMS_IOU)
+        detections = []
+        for idx in np.asarray(keep).flatten():
+            bbox, conf = cands[int(idx)]
+            detections.append({"bbox": bbox, "confidence": round(conf, 3)})
+        _backend_status = "yolo"
+        return detections
+    except Exception as exc:
+        logger.error("YOLO detection error: %s", exc)
+        if YOLO_FALLBACK_TO_HOG:
+            return _detect_hog(frame)
+        _backend_status = "failed"
+        return []
+
+
+_BACKENDS = {"hog": _detect_hog, "yolo": _detect_yolo,
+             "simulation": _detect_simulation}
 
 
 # ── Centroid tracker ─────────────────────────────────────────────────────────
@@ -264,13 +428,19 @@ def _on_frame(frame, frame_id: str) -> None:
 
 
 def resolve_backend_name() -> str:
-    """Phase 6: 'auto' picks hog when OpenCV is importable, else simulation.
-    Explicit hog/simulation requests are honored (hog degrades to simulation
-    without cv2)."""
-    if PERSON_BACKEND in ("hog", "simulation"):
-        return PERSON_BACKEND if (PERSON_BACKEND == "simulation" or _CV_OK) \
-            else "simulation"
-    return "hog" if _CV_OK else "simulation"  # auto
+    """'auto' prefers yolo when the ONNX model + a runtime exist (recommended:
+    far better accuracy than HOG at similar CPU cost), else hog when OpenCV
+    is importable, else simulation. Explicit names are honored with the same
+    degradation chain yolo→hog→simulation."""
+    if PERSON_BACKEND == "simulation":
+        return "simulation"
+    if PERSON_BACKEND == "yolo":
+        return "yolo" if yolo_available() else ("hog" if _CV_OK else "simulation")
+    if PERSON_BACKEND == "hog":
+        return "hog" if _CV_OK else "simulation"
+    if yolo_available():                    # auto
+        return "yolo"
+    return "hog" if _CV_OK else "simulation"
 
 
 def _worker_loop() -> None:
@@ -339,6 +509,7 @@ def get_tracked() -> list[dict]:
 
 
 def stats() -> dict:
+    _load_yolo()  # populate _yolo_runtime so stats reflect real availability
     with _lock:
         return {
             "enabled": PERSON_ENABLED,
@@ -346,6 +517,9 @@ def stats() -> dict:
             "resolved_backend": _resolved_backend,
             "requested_backend": PERSON_BACKEND,
             "opencv_available": _CV_OK,
+            "yolo_available": yolo_available(),
+            "yolo_model_path": YOLO_MODEL_PATH,
+            "yolo_runtime": _yolo_runtime,
             "frames_seen": _frames_seen,
             "tracked_count": len(_tracks),
             "history_size": len(_history),
