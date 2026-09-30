@@ -45,7 +45,7 @@ from routers import route_graph as route_graph_router  # Phase 5: taught route g
 
 # WebSocket handlers
 from ws_handlers import telemetry_ws, control_ws, alerts_ws, call_ws
-from ws_handlers import compat_ws  # Phase 21: multiplexed app socket
+from ws_handlers import compat_ws, app_ws  # Phase 21: multiplexed app socket
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
