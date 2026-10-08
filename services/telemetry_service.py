@@ -155,7 +155,6 @@ def get_ws_telemetry_payload() -> dict:
 
     # ── Ultrasonic ───────────────────────────────────────────────────────────
     try:
-        from services.telemetry_service import _ultra_state
         ultra_block = _ultra_state()
     except Exception:
         ultra_block = _safe_ultra()
@@ -261,7 +260,7 @@ def get_ws_telemetry_payload() -> dict:
 # ---------------------------------------------------------------------------
 
 def _ultra_state() -> dict:
-    from services.telemetry_service import _US_SIM as us   # internal ref below
+    us = _US_SIM   # internal ref below
     return {
         "front_distance_m": round(us["front_distance_m"], 3),
         "rear_distance_m":  round(us["rear_distance_m"], 3),
