@@ -97,6 +97,9 @@ async def lifespan(app: FastAPI):
     from services import imu_service
     imu_service.start_monitoring()
     
+    from services import ultrasonic_service
+    ultrasonic_service.start_monitoring()
+    
     from services import current_service
     current_service.start()
 
