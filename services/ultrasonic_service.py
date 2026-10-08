@@ -18,8 +18,8 @@ def _ultrasonic_loop():
     
     while True:
         try:
-            front = front_sensor.read()
-            rear = rear_sensor.read()
+            front = front_sensor.read_distance()
+            rear = rear_sensor.read_distance()
             
             _US_SIM["front_distance_m"] = round(front, 3)
             _US_SIM["rear_distance_m"]  = round(rear, 3)
