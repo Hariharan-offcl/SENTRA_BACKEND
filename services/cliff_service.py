@@ -58,43 +58,35 @@ _thread: threading.Thread | None = None
 
 def _init_hardware() -> None:
     """Link to the HAL's cliff sensor instead of claiming pins itself."""
-    global _h, _h_owned, _simulated
+    global _simulated
     from core.simulation import activate_once
     activate_once()
+    
     if not CLIFF_ENABLED or core_config.SIMULATION:
-        if core_config.SIMULATION:
-            _simulated = True
+        _simulated = True
         return
+        
     try:
         from hardware.manager import hardware_manager
-        # Use the HAL instance; it handles the GPIO claims
         cliff_hal = hardware_manager.cliff
         if cliff_hal is None or not getattr(cliff_hal, "initialized", False):
-            # Give the HAL a moment or attempt to trigger its initialization if needed
-            # In this architecture, hardware_manager.initialize() is called in main.py
             raise RuntimeError("Cliff HAL not initialized")
 
-        from hardware.gpio_manager import gpio_manager
-        _h = gpio_manager.chip # Use shared handle
-        _h_owned = False
         _simulated = False
         logger.info("Cliff service linked to HAL (shared handle)")
     except Exception as exc:
         logger.warning("Cliff service linkage failed — simulated (%s)", exc)
-        _h = None
-        _h_owned = False
         _simulated = True
 
 
 def _read_once() -> tuple[bool, bool]:
-    if _h is None or core_config.SIMULATION:
+    if _simulated:
         return False, False  # simulated: never a cliff
+        
     try:
-        left_raw = lgpio.gpio_read(_h, CLIFF_LEFT_GPIO)
-        right_raw = lgpio.gpio_read(_h, CLIFF_RIGHT_GPIO)
-        if CLIFF_ACTIVE_HIGH:
-            return bool(left_raw), bool(right_raw)
-        return not left_raw, not right_raw
+        from hardware.manager import hardware_manager
+        res = hardware_manager.cliff.read()
+        return res.get("left", False), res.get("right", False)
     except Exception as exc:
         logger.error("Cliff read error: %s", exc)
         return False, False
@@ -106,6 +98,7 @@ def _poll_loop() -> None:
         with _lock:
             _state["left_cliff"]  = left
             _state["right_cliff"] = right
+            _state["simulated"]   = _simulated
             _state["last_read"]   = time.time()
         _stop_event.wait(POLL_INTERVAL_S)
 

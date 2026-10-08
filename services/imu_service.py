@@ -79,6 +79,7 @@ def _poll_loop() -> None:
                     "gy": data["gyro"]["y"],
                     "gz": data["gyro"]["z"],
                     "last_read": time.time(),
+                    "simulated": imu.status().get("mode") == "simulated",
                     "calibrated": imu.status().get("calibrated", False)
                 })
         except Exception as e:

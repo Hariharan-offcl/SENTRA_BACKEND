@@ -140,7 +140,6 @@ async def lifespan(app: FastAPI):
     safety_events.add_listener(compat_ws._on_safety_event)
     relay_client.start()
     safety_events.attach_loop(asyncio.get_running_loop())
-    cliff_service.start_monitoring()
 
     # Patrol thread starts idle; it only acts while mode == PATROL
     motor_service.start_patrol_loop()
