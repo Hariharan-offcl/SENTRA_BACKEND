@@ -1,0 +1,46 @@
+# SENTRA Reference Cloud Relay — systemd unit for the VPS (Phase 19)
+#
+# The relay is the Phase 16 reference broker; it is stateless, so it scales by
+# running more replicas behind a TLS-terminating load balancer (protocol
+# unchanged — see docs/BACKEND_ARCHITECTURE.md §32 scaling notes).
+#
+# Install (on the VPS):
+#   sudo useradd --system --home /opt/sentra-relay --shell /usr/sbin/nologin sentra-relay
+#   sudo mkdir -p /opt/sentra-relay && sudo chown sentra-relay:sentra-relay /opt/sentra-relay
+#   # copy the repo (at least tools/relay_server.py + requirements.txt) there
+#   cd /opt/sentra-relay && python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+#   echo 'SENTRA_RELAY_UNIT_SECRET=<long-random-secret>' | sudo tee /opt/sentra-relay/.env
+#   sudo cp deploy/sentra-relay.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now sentra-relay.service
+#
+# Behind nginx/Caddy: terminate TLS (wss://) and proxy to 127.0.0.1:8765.
+
+[Unit]
+Description=SENTRA Reference Cloud Relay (Phase 16 broker)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sentra-relay
+Group=sentra-relay
+WorkingDirectory=/opt/sentra-relay
+EnvironmentFile=/opt/sentra-relay/.env
+ExecStart=/opt/sentra-relay/venv/bin/python tools/relay_server.py --port 8765 --host 127.0.0.1
+
+# The relay holds no GPIO/I2C and writes nothing; minimal profile.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,60 @@
+# SENTRA Backend — systemd unit for the Raspberry Pi 5 unit (Phase 19)
+#
+# Install:
+#   sudo cp deploy/sentra-backend.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now sentra-backend.service
+#
+# Logs / status:
+#   journalctl -u sentra-backend -f
+#   systemctl status sentra-backend
+#   curl -s http://127.0.0.1:8080/api/v1/system/status
+
+[Unit]
+Description=SENTRA Elderly-Assistance Rover Backend (Pi 5)
+Documentation=file:///opt/sentra/docs/BACKEND_ARCHITECTURE.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Type=notify + WatchdogSec (Phase 20): the app signals READY=1 via sd_notify
+# and pings WATCHDOG=1 every WatchdogSec/2 (core/sd_notify.py). If the process
+# wedges, systemd kills and restarts it. Off-systemd runs are unaffected.
+Type=notify
+WatchdogSec=30s
+TimeoutStartSec=90s
+User=sentra
+Group=sentra
+WorkingDirectory=/opt/sentra
+# The mode (REAL vs SIMULATION) is fixed at process start via the environment;
+# it lives in /opt/sentra/.env (see deploy/env.template).
+EnvironmentFile=/opt/sentra/.env
+ExecStart=/opt/sentra/venv/bin/python -m uvicorn main:app \
+    --host 0.0.0.0 \
+    --port 8080 \
+    --log-level info
+
+# ── Restart policy ────────────────────────────────────────────────────────────
+# A rover backend must come back on its own; restart after 5 s, forever.
+Restart=always
+RestartSec=5s
+
+# ── Hardening ─────────────────────────────────────────────────────────────────
+# lgpio needs /dev/gpiochip*; the sentra user gets access via the `gpio` group
+#   sudo usermod -aG gpio,sentinel i2c sentra     (see deploy/install.sh)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/sentra ~/sentra_data
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false   # OpenCV JIT needs executable memory
+DeviceAllow=char-gpiochip rw
+DeviceAllow=char-i2c rw
+
+[Install]
+WantedBy=multi-user.target
