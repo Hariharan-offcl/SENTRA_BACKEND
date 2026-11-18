@@ -35,6 +35,7 @@ import logging
 import os
 import threading
 import time
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -190,15 +191,15 @@ def sample(person_id: int, bbox: list, confidence: float,
         try:
             from services import vision_service
             from services import person_recognition
-            import os
-            import time
+            import os as _os
+            import time as _time
             jpeg = vision_service._latest_node_jpeg()
             if jpeg:
-                os.makedirs(person_recognition.SNAPSHOT_DIR, exist_ok=True)
-                path = os.path.join(person_recognition.SNAPSHOT_DIR, f"fall_{int(time.time())}.jpg")
+                _os.makedirs(person_recognition.SNAPSHOT_DIR, exist_ok=True)
+                path = _os.path.join(person_recognition.SNAPSHOT_DIR, f"fall_{int(_time.time())}.jpg")
                 with open(path, "wb") as f:
                     f.write(jpeg)
-                evidence["snapshot"] = os.path.basename(path)
+                evidence["snapshot"] = _os.path.basename(path)
         except Exception as e:
             logger.error("Failed to save fall snapshot: %s", e)
 

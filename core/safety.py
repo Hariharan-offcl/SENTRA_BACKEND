@@ -244,8 +244,12 @@ class SafetyLayer:
         sensors = self._read_sensors()
         moving_forward = (left_pct > 0 and right_pct > 0)
         moving_backward = (left_pct < 0 and right_pct < 0)
+        any_motion = moving_forward or moving_backward or abs(left_pct) > 1.0 or abs(right_pct) > 1.0
 
-        if self.cliff_triggered(sensors):
+        # Cliff check: only block when actually commanding movement.
+        # Zero/near-zero stop commands must NOT trigger cliff warnings —
+        # the sensor fires continuously from fixed obstacles near the dock.
+        if any_motion and self.cliff_triggered(sensors):
             self._zero_motors()
             logger.warning("SAFETY STOP: cliff sensor triggered (owner=%s)", owner)
             self._report("CLIFF", {"owner": owner}, severity="DANGER")
