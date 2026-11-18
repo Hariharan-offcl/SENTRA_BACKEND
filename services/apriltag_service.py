@@ -63,7 +63,8 @@ _cached_detector = None
 
 
 def _detector():
-    """Build (once) and return the Aruco/AprilTag detector (OpenCV 4.7+ API)."""
+    """Build (once) and return the Aruco/AprilTag detector tuple: (aruco_detector_or_None, dictionary, params).
+    Compatible with OpenCV < 4.7 and >= 4.7."""
     global _cached_detector
     if _cached_detector is None:
         family_map = {
@@ -73,7 +74,20 @@ def _detector():
         dict_id = family_map.get(FAMILY_NAME) or cv2.aruco.DICT_APRILTAG_36h11
         dictionary = cv2.aruco.getPredefinedDictionary(dict_id)
         params = cv2.aruco.DetectorParameters()
-        _cached_detector = cv2.aruco.ArucoDetector(dictionary, params)
+        # Tuning parameters for phone screen glare and contrast
+        try:
+            params.adaptiveThreshWinSizeMin = 3
+            params.adaptiveThreshWinSizeMax = 23
+            params.adaptiveThreshWinSizeStep = 10
+        except Exception:
+            pass
+        detector_obj = None
+        if hasattr(cv2.aruco, "ArucoDetector"):
+            try:
+                detector_obj = cv2.aruco.ArucoDetector(dictionary, params)
+            except Exception:
+                detector_obj = None
+        _cached_detector = (detector_obj, dictionary, params)
     return _cached_detector
 
 
@@ -89,8 +103,11 @@ def process_frame(frame, frame_id: str = "", source: str = "phone") -> list[dict
     now = time.time()
     results = []
     try:
-        detector = _detector()
-        corners, ids, rejected = detector.detectMarkers(frame)
+        det_obj, dictionary, params = _detector()
+        if det_obj is not None:
+            corners, ids, rejected = det_obj.detectMarkers(frame)
+        else:
+            corners, ids, rejected = cv2.aruco.detectMarkers(frame, dictionary, parameters=params)
         h, w = frame.shape[:2]
         cx = w / 2.0
         if ids is not None:

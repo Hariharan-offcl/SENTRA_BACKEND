@@ -81,10 +81,21 @@ def _fire_callbacks(loc: dict) -> None:
 
 def _describe(det: dict) -> Optional[dict]:
     """Turn a raw apriltag detection dict into a location description.
-    Returns None for unregistered tags."""
+    Provides a default unmapped location for unregistered tags."""
     tag = tag_map.describe_tag(det["tag_id"])
     if tag is None:
-        return None
+        return {
+            "tag_id":     det["tag_id"],
+            "name":       f"Tag {det['tag_id']}",
+            "type":       "UNMAPPED",
+            "registered": False,
+            "seen_at":    det["timestamp"],
+            "age_s":      round(time.time() - det["timestamp"], 2),
+            "distance_m": det.get("distance_m"),
+            "bearing_deg": det.get("bearing_deg"),
+            "confidence": round(det.get("confidence") or 0.0, 3),
+            "source":     det.get("source", "phone"),
+        }
     return {
         "tag_id":     det["tag_id"],
         "name":       tag["name"],
@@ -100,13 +111,13 @@ def _describe(det: dict) -> Optional[dict]:
 
 
 def _best_visible() -> Optional[dict]:
-    """Return the highest-quality registered visible tag description."""
+    """Return the highest-quality visible tag description."""
     visible  = apriltag_service.get_visible()
     described = [d for d in (_describe(det) for det in visible) if d is not None]
     if not described:
         return None
     described.sort(key=lambda d: (
-        0 if d["type"] == "DOCK" else 1,
+        0 if (d.get("registered") and d.get("type") == "DOCK") else (1 if d.get("registered") else 2),
         d["distance_m"] if d["distance_m"] is not None else 999.0,
         -d["confidence"],
     ))

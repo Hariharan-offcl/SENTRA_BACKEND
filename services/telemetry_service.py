@@ -139,7 +139,7 @@ def get_ws_telemetry_payload() -> dict:
     current_location = None
     april_tag = None
     try:
-        from services import localization_service
+        from services import localization_service, apriltag_service
         loc = localization_service.get_localization()
         last_known = loc.get("last_known")
         if last_known:
@@ -150,6 +150,17 @@ def get_ws_telemetry_payload() -> dict:
                 "distance_m": last_known.get("distance_m"),
                 "age_s":      last_known.get("age_s"),
             }
+        else:
+            visible = apriltag_service.get_visible(max_age_s=2.5)
+            if visible:
+                best_vis = visible[0]
+                current_location = f"Tag {best_vis['tag_id']}"
+                april_tag = {
+                    "tag_id":     best_vis["tag_id"],
+                    "name":       f"Tag {best_vis['tag_id']}",
+                    "distance_m": best_vis.get("distance_m"),
+                    "age_s":      round(time.time() - best_vis["timestamp"], 2),
+                }
     except Exception:
         pass
 
