@@ -278,7 +278,7 @@ def _state_center_person(sess: dict) -> None:
 
     x, y, w, h = person["bbox"]
     center_x = x + (w / 2.0)
-    frame_width = 640.0
+    frame_width = float(person.get("frame_width") or 640.0)
     margin = frame_width * 0.15
     mid = frame_width / 2.0
 
@@ -330,7 +330,7 @@ def _state_approach_person(sess: dict) -> None:
     # Check centering drift, if they moved horizontally, go back to centering
     x, y, w, h = person["bbox"]
     center_x = x + (w / 2.0)
-    frame_width = 640.0
+    frame_width = float(person.get("frame_width") or 640.0)
     margin = frame_width * 0.25 # Slightly looser margin while moving forward
     mid = frame_width / 2.0
     if center_x < (mid - margin) or center_x > (mid + margin):

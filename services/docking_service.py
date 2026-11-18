@@ -277,9 +277,26 @@ def _state_approach(sess: dict) -> None:
                 _session["blocked_since"] = None
 
 
+DOCK_ALIGN_TIMEOUT_S = 30.0  # rover can't align forever — abort after 30 s
+
 def _state_align(sess: dict) -> None:
-    """Rotate until bearing within tolerance, then dock."""
+    """Rotate until bearing within tolerance, then dock.
+    Times out after DOCK_ALIGN_TIMEOUT_S to prevent an infinite spin if the
+    tag drifts out of view or the bearing never converges."""
     from services.motor_service import apply_wheel_speeds
+
+    # ── Align timeout guard ───────────────────────────────────────────────
+    align_started = sess.get("align_started_at")
+    if align_started is None:
+        sess["align_started_at"] = time.time()
+        align_started = sess["align_started_at"]
+    if time.time() - align_started > DOCK_ALIGN_TIMEOUT_S:
+        logger.warning("Dock %s: ALIGN timed out after %.0fs — aborting",
+                       sess["id"], DOCK_ALIGN_TIMEOUT_S)
+        _log_event({"event": "align_timeout"}, severity="WARNING")
+        cancel_return("align_timeout")
+        return
+
     det = _latest_detection(sess["tag_id"], max_age_s=core_config.DOCK_TAG_LOST_GRACE_S)
     if det is None or det.get("bearing_deg") is None:
         # Can't read bearing (e.g. no intrinsics) — accept position as docked

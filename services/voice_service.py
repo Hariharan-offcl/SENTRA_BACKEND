@@ -180,9 +180,6 @@ def _dispatch_stop() -> dict:
     st = get_robot_state()
     if st.get_mode() != "EMERGENCY_STOP":
         st.request_mode("STANDBY", requested_by="voice_service")
-        dock = docking_service.start_return(docked_by="voice_stop")
-        if dock.get("ok"):
-            return {"handled": True, "action": "stop_and_dock", "state": "RETURN_TO_DOCK"}
     return {"handled": True, "action": "stop", "state": "STANDBY"}
 
 
