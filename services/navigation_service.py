@@ -182,9 +182,11 @@ def _handle_gate_refusal(sess: dict) -> None:
 def _state_seek(sess: dict) -> None:
     from services.motor_service import apply_wheel_speeds
     if time.time() - sess["state_started_at"] > core_config.NAV_SEARCH_TIMEOUT_S:
-        logger.warning("Nav %s: search timed out", sess["id"])
-        _log_event({"event": "search_timeout", "target": sess["target"]}, severity="WARNING")
-        cancel("search_timeout")
+        logger.warning("Nav %s: search timed out — entering recovery scan", sess["id"])
+        _log_event({"event": "search_timeout", "target": sess["target"],
+                    "recovery": True}, severity="WARNING")
+        # Strategy 2: attempt self-rescue before alerting caregiver
+        _set_state(sess, "RECOVERY_SCAN")
         return
     det = _latest_detection(sess["tag_id"], max_age_s=core_config.PATROL_CONFIRM_FRESH_S)
     if det is not None:
@@ -197,6 +199,135 @@ def _state_seek(sess: dict) -> None:
     if not decision.get("applied"):
         _handle_gate_refusal(sess)
 
+
+
+
+def _state_recovery_scan(sess: dict) -> None:
+    """Prompt 24 — Strategy 2: self-rescue when the target tag is not visible.
+
+    Phase A  Slow 360° rotation scanning for ANY known tag.
+    Phase B  Drive forward briefly then rescan (up to MAX_RECOVERY_ATTEMPTS times).
+    Phase C  Give up: stop motors, fire ROBOT_LOST alert, end session.
+
+    The safety layer remains fully active throughout — ultrasonic + cliff IR
+    will halt motors exactly as during normal autonomous operation.
+    """
+    from services.motor_service import apply_wheel_speeds, stop_all
+
+    # ── Initialise recovery sub-state on first entry ──────────────────────
+    if "recovery" not in sess:
+        sess["recovery"] = {
+            "phase": "A",          # A = scan, B = forward burst
+            "attempt": 0,
+            "scan_start": time.time(),
+            "forward_start": None,
+        }
+    r = sess["recovery"]
+
+    # ── Phase A: slow 360° scan ───────────────────────────────────────────
+    if r["phase"] == "A":
+        # First check whether ANY known tag is now visible.
+        try:
+            from services import localization_service
+            loc = localization_service.get_localization()
+            last = loc.get("last_known") or {}
+            if last.get("tag_id") is not None and last.get("confidence", 0) >= 2:
+                recovered_tag = int(last["tag_id"])
+                recovered_name = last.get("name", "unknown")
+                logger.info("Nav %s: recovery found tag %s (%s) — resuming navigation",
+                            sess["id"], recovered_tag, recovered_name)
+                _log_event({"event": "recovery_success", "recovered_at": recovered_name,
+                            "target": sess["target"]})
+                # Re-route from recovered location to original target
+                from services import tag_map, route_graph
+                target_tag = sess.get("tag_id")
+                target_name = sess.get("final_target") or sess.get("target")
+                hops_new, _ = _plan_hops(target_name, target_tag)
+                with _lock:
+                    if _session and _session["id"] == sess["id"]:
+                        _session["hops"] = hops_new
+                        _session["hop_index"] = 0
+                        _session["tag_id"] = hops_new[0]["tag_id"]
+                        _session["target"] = hops_new[0]["name"]
+                        _session.pop("recovery", None)
+                _set_state(sess, "SEEK")
+                return
+        except Exception as exc:
+            logger.debug("Nav recovery: localization check failed: %s", exc)
+
+        # Still scanning: rotate slowly
+        elapsed = time.time() - r["scan_start"]
+        if elapsed < 8.0:  # ~8 s ≈ slow 360° at half speed
+            duty = core_config.RECOVERY_SCAN_DUTY
+            direction = 1 if sess.get("search_direction", 1) > 0 else -1
+            apply_wheel_speeds(direction * duty, -direction * duty,
+                               owner="navigation_service", mode=NAVIGATION)
+            return
+        # Scan complete — no tag found → Phase B (or give up)
+        if r["attempt"] >= core_config.MAX_RECOVERY_ATTEMPTS:
+            _robot_lost(sess)
+            return
+        r["phase"] = "B"
+        r["forward_start"] = time.time()
+        stop_all("recovery_scan_done")
+        logger.info("Nav %s: recovery scan attempt %d — driving forward",
+                    sess["id"], r["attempt"] + 1)
+
+    # ── Phase B: drive forward briefly, then rescan ───────────────────────
+    if r["phase"] == "B":
+        elapsed_fwd = time.time() - (r["forward_start"] or time.time())
+        if elapsed_fwd < core_config.RECOVERY_FORWARD_S:
+            # Slow forward movement; safety layer blocks if obstacle detected
+            decision = apply_wheel_speeds(
+                core_config.RECOVERY_SCAN_DUTY,
+                core_config.RECOVERY_SCAN_DUTY,
+                owner="navigation_service", mode=NAVIGATION,
+            )
+            if not decision.get("applied"):
+                # Obstacle blocked forward movement — skip to rescan immediately
+                r["phase"] = "A"
+                r["attempt"] += 1
+                r["scan_start"] = time.time()
+            return
+        # Forward burst complete → back to Phase A for a fresh scan
+        stop_all("recovery_forward_done")
+        r["attempt"] += 1
+        r["phase"] = "A"
+        r["scan_start"] = time.time()
+
+
+def _robot_lost(sess: dict) -> None:
+    """Phase C: recovery failed — stop and alert the caregiver."""
+    global _session
+    from services.motor_service import stop_all
+    stop_all("robot_lost")
+    last_known = "unknown location"
+    try:
+        from services import localization_service
+        loc = localization_service.get_localization()
+        name = (loc.get("last_known") or {}).get("name")
+        if name:
+            last_known = name
+    except Exception:
+        pass
+    description = (f"Robot cannot find landmarks near {last_known} "
+                   f"— manual assist needed to drive it near an AprilTag")
+    logger.warning("Nav %s: ROBOT_LOST — %s", sess["id"], description)
+    _log_event({"event": "robot_lost", "last_known": last_known,
+                "target": sess.get("target")}, severity="WARNING")
+    try:
+        safety_events.report("ROBOT_LOST",
+                             {"description": description,
+                              "last_known": last_known,
+                              "target": sess.get("target")},
+                             severity="WARNING")
+    except Exception as exc:
+        logger.error("Nav: failed to push ROBOT_LOST alert: %s", exc)
+    with _lock:
+        _session = None
+    st = get_robot_state()
+    if st.get_mode() == NAVIGATION:
+        st.request_mode(STANDBY, requested_by="navigation_service")
 
 def _state_approach(sess: dict) -> None:
     from services.motor_service import apply_wheel_speeds
@@ -470,7 +601,8 @@ def _arrived(sess: dict) -> None:
 
 def _engine_loop() -> None:
     handlers = {
-        "SEEK": _state_seek, 
+        "SEEK": _state_seek,
+        "RECOVERY_SCAN": _state_recovery_scan,
         "APPROACH": _state_approach, 
         "PERSON_SEARCH": _state_person_search, 
         "CENTER_PERSON": _state_center_person,

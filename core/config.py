@@ -91,6 +91,15 @@ NAV_SEARCH_TIMEOUT_S: float = float(os.getenv("SENTRA_NAV_SEARCH_TIMEOUT_S", "30
 NAV_APPROACH_TIMEOUT_S: float = float(os.getenv("SENTRA_NAV_APPROACH_TIMEOUT_S", "90"))
 NAV_ARRIVE_M: float = float(os.getenv("SENTRA_NAV_ARRIVE_M", "0.45"))  # stop this far from a location tag
 
+# ── Recovery scan (Prompt 24) ─────────────────────────────────────────────
+# Triggered when SEEK times out instead of giving up immediately (Strategy 2).
+# Phase A: slow 360° scan; Phase B: short forward burst + rescan; Phase C: alert caregiver.
+RECOVERY_SCAN_DUTY: float = float(os.getenv("SENTRA_RECOVERY_SCAN_DUTY",
+                                             str(DOCK_SEARCH_TURN_DUTY * 0.5)))
+MAX_RECOVERY_ATTEMPTS: int = int(os.getenv("SENTRA_MAX_RECOVERY_ATTEMPTS", "3"))
+# Seconds at slow forward speed ≈ 0.3 m of forward movement per attempt.
+RECOVERY_FORWARD_S: float = float(os.getenv("SENTRA_RECOVERY_FORWARD_S", "1.5"))
+
 # Graduated speed reduction for autonomous navigation (SafetyLayer remains the
 # final hard-stop authority).
 FUSION_CAUTION_M: float = float(os.getenv("SENTRA_FUSION_CAUTION_M", "0.8"))
