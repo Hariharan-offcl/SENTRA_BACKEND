@@ -49,7 +49,7 @@ RECOG_ENABLED = os.getenv("SENTRA_RECOG_ENABLED", "true").strip().lower() in (
     "1", "true", "yes", "on")
 RECOG_BACKEND = os.getenv("SENTRA_RECOG_BACKEND", "simple").strip().lower()
 MATCH_THRESH = float(os.getenv("SENTRA_RECOG_THRESHOLD",
-                               os.getenv("SENTRA_RECOG_MATCH_THRESH", "0.50")))
+                               os.getenv("SENTRA_RECOG_MATCH_THRESH", "0.40")))
 POLL_S = float(os.getenv("SENTRA_RECOG_POLL_S", "0.2"))
 UNKNOWN_COOLDOWN_S = float(os.getenv("SENTRA_RECOG_UNKNOWN_COOLDOWN_S", "15"))
 SNAPSHOT_DIR = os.path.expanduser(
@@ -121,10 +121,16 @@ def match_embedding(embedding: list[float]) -> Optional[dict]:
     """Best cosine match above threshold. Returns {person_key, name, similarity}."""
     from services import person_registry
     best = None
+    top_seen = None
     for key, name, ref in person_registry.all_embeddings():
         sim = cosine_similarity(embedding, ref)
+        if top_seen is None or sim > top_seen["similarity"]:
+            top_seen = {"person_key": key, "name": name, "similarity": round(sim, 3)}
         if sim >= MATCH_THRESH and (best is None or sim > best["similarity"]):
             best = {"person_key": key, "name": name, "similarity": round(sim, 3)}
+    if top_seen:
+        logger.info("Face evaluated: best match '%s' score=%.3f (threshold=%.2f -> match=%s)",
+                    top_seen["name"], top_seen["similarity"], MATCH_THRESH, best is not None)
     return best
 
 

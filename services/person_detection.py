@@ -158,14 +158,25 @@ def _detect_hog(frame) -> list[dict]:
                          frame_s.shape[1], frame_s.shape[0])
             _backend_status = "hog"
             return []
+        boxes = []
+        confs = []
+        if rects is not None and len(rects) > 0:
+            for (x, y, rw, rh), weight in zip(rects, weights):
+                conf = float(min(1.0, max(0.0, weight)))
+                if conf >= MIN_CONF:
+                    boxes.append([int(x), int(y), int(rw), int(rh)])
+                    confs.append(float(conf))
+
         out = []
-        for (x, y, rw, rh), weight in zip(rects, weights):
-            conf = float(min(1.0, max(0.0, weight)))
-            if conf < MIN_CONF:
-                continue
-            out.append({"bbox": [int(x / scale), int(y / scale),
-                                 int(rw / scale), int(rh / scale)],
-                        "confidence": round(conf, 3)})
+        if boxes:
+            indices = cv2.dnn.NMSBoxes(boxes, confs, MIN_CONF, 0.3)
+            for i in indices:
+                idx = int(i[0]) if isinstance(i, (list, tuple, np.ndarray)) else int(i)
+                x, y, rw, rh = boxes[idx]
+                conf = confs[idx]
+                out.append({"bbox": [int(x / scale), int(y / scale),
+                                     int(rw / scale), int(rh / scale)],
+                            "confidence": round(conf, 3)})
         _backend_status = "hog"
         return out
     except Exception as exc:
