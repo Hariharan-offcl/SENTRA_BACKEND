@@ -674,7 +674,11 @@ async def _read_multipart_all(request: Request) -> tuple[list[bytes], str | None
 
 @router.post("/people")
 async def register_person_compat(request: Request):
-    """App spec §13b: multipart name/image/notes → register + embed."""
+    """App spec §13b: multipart name/image/notes → register + embed.
+
+    Generates multiple augmented embeddings (brightness ±20%, flipped) for
+    better real-world recognition robustness with the 32×32 simple embedder.
+    """
     from services import person_recognition, person_registry
     images, name, notes = await _read_multipart_all(request)
     if not name:
@@ -690,9 +694,25 @@ async def register_person_compat(request: Request):
         faces = person_recognition.detect_faces(frame)
         for (x, y, w, h) in faces:
             crop = frame[max(0, y):y + h, max(0, x):x + w]
+            # Base embedding
             emb = person_recognition.embed_face(crop)
             if emb:
                 embeddings.append(emb)
+            # Augmented: slightly brighter
+            bright = cv2.convertScaleAbs(crop, alpha=1.2, beta=10)
+            emb2 = person_recognition.embed_face(bright)
+            if emb2:
+                embeddings.append(emb2)
+            # Augmented: slightly darker
+            dark = cv2.convertScaleAbs(crop, alpha=0.8, beta=-10)
+            emb3 = person_recognition.embed_face(dark)
+            if emb3:
+                embeddings.append(emb3)
+            # Augmented: horizontal flip (mirror)
+            flipped = cv2.flip(crop, 1)
+            emb4 = person_recognition.embed_face(flipped)
+            if emb4:
+                embeddings.append(emb4)
         if snapshot_path is None:
             snapshot_path = person_recognition._save_unknown_snapshot(frame)
     if not embeddings:

@@ -49,7 +49,7 @@ RECOG_ENABLED = os.getenv("SENTRA_RECOG_ENABLED", "true").strip().lower() in (
     "1", "true", "yes", "on")
 RECOG_BACKEND = os.getenv("SENTRA_RECOG_BACKEND", "simple").strip().lower()
 MATCH_THRESH = float(os.getenv("SENTRA_RECOG_THRESHOLD",
-                               os.getenv("SENTRA_RECOG_MATCH_THRESH", "0.75")))
+                               os.getenv("SENTRA_RECOG_MATCH_THRESH", "0.50")))
 POLL_S = float(os.getenv("SENTRA_RECOG_POLL_S", "0.2"))
 UNKNOWN_COOLDOWN_S = float(os.getenv("SENTRA_RECOG_UNKNOWN_COOLDOWN_S", "15"))
 SNAPSHOT_DIR = os.path.expanduser(
@@ -166,8 +166,8 @@ def detect_faces(frame) -> list[tuple[int, int, int, int]]:
     try:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.equalizeHist(gray)
-        faces = cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=5,
-                                         minSize=(48, 48))
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3,
+                                         minSize=(32, 32))
         return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
     except Exception as exc:
         logger.error("detect_faces error: %s", exc)

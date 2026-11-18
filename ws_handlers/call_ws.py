@@ -10,14 +10,21 @@ from services.connection_manager import connection_manager
 router = APIRouter(tags=["WebSocket"])
 logger = logging.getLogger(__name__)
 
+# Track whether the user has sent 'ready' (and rover wasn't yet connected).
+# When rover connects, we re-send peer-ready so it starts the offer.
+_user_ready_since: float = 0.0   # 0 = not pending; epoch time otherwise
+_USER_READY_TTL_S = 30.0          # discard stale 'ready' after 30 s
+
+
 @router.websocket("/ws/webrtc/{role}")
 async def webrtc_signaling_socket(websocket: WebSocket, role: str):
+    global _user_ready_since
     # Mapping internal role terminology to ConnectionManager roles
     cm_role = "ROVER" if role == "node" else "USER"
     if role not in call_service.webrtc_clients:
         await websocket.close(code=1008, reason="role must be 'node' or 'user'")
         return
-    # Phase 4: token gate (?token=) â€” 4401 when enforced and missing/bad.
+    # Phase 4: token gate (?token=) - 4401 when enforced and missing/bad.
     from core import auth as core_auth
     if await core_auth.verify_ws_token(websocket) is None:
         return
@@ -26,7 +33,7 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
 
     previous_client = call_service.webrtc_clients[role]
     call_service.webrtc_clients[role] = websocket
-    emergency_call.note_presence(role, True)  # user connect answers the emergency call
+    emergency_call.note_presence(role, True)
     if previous_client is not None and previous_client is not websocket:
         try:
             await previous_client.close(
@@ -35,6 +42,18 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
             )
         except Exception:
             pass
+
+    # Race-condition fix: if rover just connected and user had already sent
+    # 'ready' (but rover wasn't registered yet), relay peer-ready now.
+    if role == "node":
+        age = time.time() - _user_ready_since
+        if 0 < age < _USER_READY_TTL_S:
+            logger.info("Rover connected after user ready – relaying peer-ready to rover")
+            try:
+                await websocket.send_json({"type": "peer-ready", "role": "user"})
+            except Exception:
+                pass
+
     peer_role = "user" if role == "node" else "node"
     allowed_types = {"ready", "offer", "answer", "candidate", "bye", "ping"}
 
@@ -54,12 +73,22 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
                 continue
 
             if message_type == "ready":
-                if call_service.webrtc_clients[peer_role] is not None:
+                peer = call_service.webrtc_clients[peer_role]
+                if peer is not None:
+                    # Peer is online – normal flow: tell sender their peer is ready
+                    # and tell peer that this side is ready (triggering offer from rover).
                     await websocket.send_json({"type": "peer-ready", "role": peer_role})
-                await call_service.broadcast_signal(
-                    peer_role,
-                    {"type": "peer-ready", "role": role},
-                )
+                    await call_service.broadcast_signal(
+                        peer_role,
+                        {"type": "peer-ready", "role": role},
+                    )
+                    if role == "user":
+                        _user_ready_since = 0.0  # rover is online, no need to cache
+                else:
+                    # Peer not yet connected – remember that user is ready.
+                    if role == "user":
+                        _user_ready_since = time.time()
+                        logger.info("User sent 'ready' but rover not connected yet – cached")
                 continue
 
             forwarded = {"type": message_type, "from": role}
@@ -83,11 +112,13 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
         pass
     finally:
         connection_manager.disconnect(websocket)
-        emergency_call.note_presence(role, False)  # peers gone â†’ ENDED if ACTIVE
+        emergency_call.note_presence(role, False)
         if call_service.webrtc_clients[role] is websocket:
             call_service.webrtc_clients[role] = None
             await call_service.broadcast_signal(peer_role, {"type": "peer-left", "role": role})
-
+        # Clear the ready-cache if user disconnects
+        if role == "user":
+            _user_ready_since = 0.0
 
 @router.websocket("/ws/call/{role}")
 async def call_socket(websocket: WebSocket, role: str):
