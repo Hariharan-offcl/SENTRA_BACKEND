@@ -114,10 +114,17 @@ def attach_loop(loop) -> None:
     _loop = loop
 
 
+def detach_loop(loop=None) -> None:
+    """Drop the event-loop reference during shutdown; prevents late pushes."""
+    global _loop
+    if loop is None or _loop is loop:
+        _loop = None
+
+
 def _push(notification: dict) -> None:
     """Fire-and-forget push onto /ws/alerts (any thread)."""
     loop = _loop
-    if loop is None:
+    if loop is None or loop.is_closed():
         return
     try:
         asyncio.run_coroutine_threadsafe(_broadcast(notification), loop)

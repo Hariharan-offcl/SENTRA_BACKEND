@@ -204,10 +204,12 @@ def _engine_loop() -> None:
 
         # PAUSE logic
         if session.get("paused"):
-            if st.is_estop_active() or st.get_mode() not in (PATROL, NAVIGATION):
+            if st.is_estop_active() or st.get_mode() not in (PATROL, NAVIGATION, STANDBY):
                 reason = "estop" if st.is_estop_active() else f"mode_changed_to_{st.get_mode()}"
                 _end_session(reason)
                 continue
+            if st.get_mode() == STANDBY:
+                st.request_mode(PATROL, requested_by="patrol_service")
             if st.get_mode() == NAVIGATION:
                 navigation_service.cancel("patrol_paused")
             _engine_stop.wait(ENGINE_TICK_S)
@@ -242,6 +244,14 @@ def _engine_loop() -> None:
         wp_tag = _resolve_waypoint(wp_name)
 
         nav_sess = navigation_service.status()
+        clear, path_reason = _path_is_clear(get_safety_layer_sensors())
+        if not clear:
+            with _lock:
+                if _session and _session["id"] == session["id"]:
+                    _session["blocked"] = True
+                    if not _session.get("blocked_since"):
+                        _session["blocked_since"] = time.time()
+                    _session["blocked_reason"] = path_reason
 
         # Are we there?
         if localization_service.is_at(wp_name):
@@ -254,10 +264,16 @@ def _engine_loop() -> None:
                     _session["confirmed_waypoints"].append(wp_name)
                     _session["blocked"] = False
                     _session["blocked_since"] = None
+                    completed_route = _session["index"] >= len(_session["waypoints"])
+                else:
+                    completed_route = False
             if nav_sess:
                 navigation_service.cancel("arrived")
             if st.get_mode() != PATROL:
                 st.request_mode(PATROL, requested_by="patrol_service")
+            if completed_route and not session.get("loop", True):
+                _end_session("completed")
+                continue
             _engine_stop.wait(2.0)  # pause at the waypoint before continuing
             continue
 
@@ -298,6 +314,7 @@ def _engine_loop() -> None:
             # Navigation is running, mirror its blocked state
             nav_state = nav_sess.get("state")
             blocked = (nav_state == "BLOCKED" or nav_state == "FAILED")
+            blocked = blocked or not clear
             with _lock:
                 if _session and _session["id"] == session["id"]:
                     _session["blocked"] = blocked
@@ -425,6 +442,15 @@ def pause_patrol() -> dict:
             _session["paused"] = True
             _session["paused_at"] = time.time()
     from services.motor_service import stop_all
+    try:
+        from services import navigation_service
+        if navigation_service.status() is not None:
+            navigation_service.cancel("patrol_paused")
+    except Exception:
+        pass
+    st = get_robot_state()
+    if st.get_mode() in ("NAVIGATION", "STANDBY"):
+        st.request_mode(PATROL, requested_by="patrol_service")
     stop_all("patrol_pause")
     logger.info("Patrol paused at waypoint %d/%d",
                 _session["index"], len(_session["waypoints"]))

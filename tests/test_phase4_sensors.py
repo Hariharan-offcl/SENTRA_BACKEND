@@ -103,7 +103,7 @@ from services import sensor_service
 sensor_service.start()
 time.sleep(0.5)
 snap = sensor_service.get_snapshot()
-check("snapshot has distances", snap["front_distance_m"] == 1.2 and snap["rear_distance_m"] == 0.85, str(snap))
+check("snapshot has distances", snap["front_distance_m"] == 2.0 and snap["rear_distance_m"] == 2.0, str(snap))
 check("snapshot has cliff flags", "left_cliff" in snap and "right_cliff" in snap)
 check("snapshot has imu dict", isinstance(snap["imu"], dict) and "pitch" in snap["imu"])
 check("snapshot has encoders", "speed_mps" in snap["wheel_encoders"])
@@ -119,7 +119,7 @@ check("encoders marked SIMULATED", health["wheel_encoders"]["status"] == "SIMULA
 
 provider = sensor_service.sensor_provider()
 check("safety provider shape", {"front_distance_m", "rear_distance_m", "left_cliff", "right_cliff"} <= set(provider.keys()))
-check("provider serves distances", provider["front_distance_m"] == 1.2)
+check("provider serves distances", provider["front_distance_m"] == 2.0)
 
 print("\n[4] safety gate still works through unified provider")
 import core.state as core_state

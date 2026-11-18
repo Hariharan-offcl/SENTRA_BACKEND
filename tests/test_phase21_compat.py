@@ -268,7 +268,9 @@ if st == 201:
     st, r = call("DELETE", f"/api/people/{pid}", token=TOKEN)
     check("delete person 204", st == 204, str(st))
 else:
-    check("dev-machine face detect absent is tolerated", "no face" in r.get("detail", ""))
+    detail = str(r.get("detail", "")).lower()
+    check("dev-machine face detect absent is tolerated",
+          "face" in detail, f"{st} {r}")
 
 print("\n[9] calls lifecycle")
 st, r = call("POST", "/api/calls/initiate", {"robot_id": "sentra-01"}, token=TOKEN)

@@ -232,4 +232,34 @@ async def _recv_loop(ws: WebSocket) -> None:
             logger.debug("compat WS unknown event: %s", event)
 
 
-# Endpoint removed to avoid duplication with app_ws.py
+@router.websocket("/ws")
+async def compat_app_socket(websocket: WebSocket):
+    token = websocket.query_params.get("token", "").strip()
+    if core_auth.AUTH_ENFORCED:
+        if not token:
+            await websocket.accept()
+            await websocket.close(code=4401)
+            return
+        try:
+            ctx = core_auth.verify_token(token)
+        except Exception:
+            await websocket.accept()
+            await websocket.close(code=4401)
+            return
+        device_id = ctx.device_id
+    else:
+        device_id = token or f"anon-{id(websocket)}"
+
+    await connection_manager.connect(websocket, role="USER", user_id=device_id)
+    _clients.add(websocket)
+    pusher = asyncio.create_task(_push_loop(websocket))
+    try:
+        await _recv_loop(websocket)
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.error("/ws error: %s", exc)
+    finally:
+        pusher.cancel()
+        _clients.discard(websocket)
+        connection_manager.disconnect(websocket)

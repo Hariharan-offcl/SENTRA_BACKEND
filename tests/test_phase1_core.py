@@ -88,7 +88,12 @@ def fake_motor_apply(left: float, right: float) -> None:
     applied_commands.append((left, right))
 
 
-sensors: dict = {}
+sensors: dict = {
+    "front_distance_m": 2.0,
+    "rear_distance_m": 2.0,
+    "left_cliff": False,
+    "right_cliff": False,
+}
 
 
 def fake_sensors() -> dict:

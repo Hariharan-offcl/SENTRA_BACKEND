@@ -62,6 +62,12 @@ def attach_loop(loop) -> None:
     _loop = loop
 
 
+def detach_loop(loop=None) -> None:
+    global _loop
+    if loop is None or _loop is loop:
+        _loop = None
+
+
 def register_with_fall() -> None:
     """Idempotently wire on_fall_confirmed into fall_detection's hooks."""
     global _hook_registered
@@ -235,7 +241,7 @@ def _payload(action: str, session: dict) -> dict:
 
 def _schedule_broadcast(action: str, session: Optional[dict]) -> None:
     loop = _loop
-    if loop is None or session is None:
+    if loop is None or loop.is_closed() or session is None:
         return
     try:
         asyncio.run_coroutine_threadsafe(_broadcast(action, session), loop)

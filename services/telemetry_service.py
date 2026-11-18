@@ -253,6 +253,9 @@ def get_ws_telemetry_payload() -> dict:
         v = current_block["voltage_v"]
         battery_percent = max(0.0, min(100.0, (v - 9.0) / (12.6 - 9.0) * 100.0))
 
+    from services import sensor_service
+    encoders = sensor_service.get_snapshot().get("wheel_encoders", {})
+
     return {
         "type":             "telemetry",
         "timestamp":        round(now, 3),
@@ -261,12 +264,31 @@ def get_ws_telemetry_payload() -> dict:
         "safety_state":     safety_state,
         "current_location": current_location,
         "april_tag":        april_tag,
-        "ultrasonic":       ultra_block,
+        "ultrasonic": {
+            "front_distance_m": ultra_block["front_distance_m"],
+            "rear_distance_m": ultra_block["rear_distance_m"],
+        },
+        "ultrasonic_status": ultra_block,
         "cliff":            cliff_block,
         "imu":              imu_block,
+        "mpu6050": {
+            "ax": imu_block["accel"]["x"],
+            "ay": imu_block["accel"]["y"],
+            "az": imu_block["accel"]["z"],
+            "gx": imu_block["gyro"]["x"],
+            "gy": imu_block["gyro"]["y"],
+            "gz": imu_block["gyro"]["z"],
+            "pitch": imu_block["pitch"],
+            "roll": imu_block["roll"],
+            "yaw": imu_block["yaw"],
+            "simulated": imu_block["simulated"],
+        },
         "current_sensor":   current_block,
         "system":           system_block,
         "battery_percent":  round(battery_percent, 1),
+        "battery":          round(battery_percent, 1),
+        "mode":             robot_mode,
+        "wheel_encoders":   encoders,
         "navigation_state": nav_state,
         "sensor_fusion": fusion_status,
     }

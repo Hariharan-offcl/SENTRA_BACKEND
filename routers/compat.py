@@ -31,6 +31,7 @@ Standard envelopes: success → {"data": ...}; error → {"detail": "..."}.
 """
 
 import logging
+import os
 import secrets
 import time
 
@@ -615,15 +616,8 @@ def get_alert_image(alert_id: str):
             data = f.read()
     except OSError:
         raise HTTPException(status_code=404, detail="snapshot file missing")
-    # The app parses {image_b64|image_url} JSON (alert_service.getAlertImage);
-    # raw JPEG bytes were silently dropped by its JSON decode. Wrap in the
-    # envelope it expects.
-    import base64 as _b64
-    return _ok({
-        "alert_id": alert_id,
-        "mime": "image/jpeg",
-        "image_b64": _b64.b64encode(data).decode("ascii"),
-    })
+    return _Response(content=data, media_type="image/jpeg",
+                     headers={"Cache-Control": "no-store"})
 
 
 @router.api_route("/alerts/{alert_id}/dismiss", methods=["POST", "PATCH"])
@@ -634,6 +628,47 @@ def dismiss_alert(alert_id: str):
     if not ok:
         raise HTTPException(status_code=404, detail="unknown alert")
     return _ok({})
+
+
+@router.post("/alerts/{alert_id}/mark-known")
+def mark_alert_person_known(alert_id: str, body: dict):
+    """Register the alert snapshot as a known person and dismiss the alert."""
+    name = str((body or {}).get("name", "")).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    notification = _get_notification(alert_id)
+    image_file = notification.get("image_file")
+    if not image_file:
+        raise HTTPException(status_code=409, detail="alert has no snapshot")
+
+    import cv2
+    import numpy as np
+    from services import person_registry, person_recognition
+
+    path = os.path.join(person_recognition.SNAPSHOT_DIR, os.path.basename(image_file))
+    frame = cv2.imread(path)
+    if frame is None:
+        raise HTTPException(status_code=404, detail="snapshot file missing")
+    faces = person_recognition.detect_faces(frame)
+    if not faces:
+        raise HTTPException(status_code=400, detail="no face found in alert snapshot")
+
+    embeddings = []
+    for x, y, w, h in faces:
+        crop = frame[max(0, y):y + h, max(0, x):x + w]
+        embedding = person_recognition.embed_face(crop)
+        if embedding:
+            embeddings.append(embedding)
+    if not embeddings:
+        raise HTTPException(status_code=400, detail="no usable face found")
+    try:
+        record = person_registry.add_person(name, embeddings, snapshot_path=path)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    notification_service.ack(alert_id)
+    return _ok({"person": cm.person_object(record), "alert_id": alert_id, "dismissed": True})
 
 
 # ── 13. People registry ──────────────────────────────────────────────────────

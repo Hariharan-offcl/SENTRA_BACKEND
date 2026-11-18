@@ -245,6 +245,10 @@ async def lifespan(app: FastAPI):
 
     # ── Shutdown ─────────────────────────────────────────────────────────────
     logger.info("SENTRA Backend shutting down")
+    from services import notification_service
+    from services import emergency_call
+    notification_service.detach_loop(asyncio.get_running_loop())
+    emergency_call.detach_loop(asyncio.get_running_loop())
     from core import sd_notify as _sd  # Phase 20
     _sd.notify("STOPPING=1")
     _sd.heartbeat.stop()
@@ -358,6 +362,7 @@ app.include_router(control_ws.router)
 app.include_router(alerts_ws.router)
 app.include_router(call_ws.router)
 app.include_router(app_ws.router)  # Phase 1 contract: /ws/user + /ws/rover
+app.include_router(compat_ws.router)  # Phase 21 compatibility /ws envelope
 
 
 # ── Static file serving (snapshots download) ──────────────────────────────────

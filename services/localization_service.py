@@ -283,4 +283,13 @@ def reset() -> None:
         _candidate_hits   = 0
         _candidate_first_hit = 0.0
         _candidate_det    = None
+    visible = apriltag_service.get_visible()
+    if visible:
+        best = _describe(max(visible, key=lambda d: d.get("confidence") or 0))
+        if best is not None:
+            now = time.time()
+            with _lock:
+                _last_known = best
+                _confirmed_at = now
+                _last_seen_any_at = now
     logger.info("Localization reset")

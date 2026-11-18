@@ -246,6 +246,26 @@ class SafetyLayer:
         moving_backward = (left_pct < 0 and right_pct < 0)
         any_motion = moving_forward or moving_backward or abs(left_pct) > 1.0 or abs(right_pct) > 1.0
 
+        # Sensor/read freshness is fail-safe: missing or stale sensor state
+        # must stop motion instead of silently allowing an autonomous command.
+        sensor_timestamp = sensors.get("timestamp")
+        if any_motion:
+            provider_wired = False
+            with self._lock:
+                provider_wired = self._sensor_provider is not None
+            stale = (isinstance(sensor_timestamp, (int, float))
+                     and time.time() - float(sensor_timestamp) > 1.5)
+            sensor_failure = provider_wired and not sensors
+            if sensor_failure or stale:
+                self._zero_motors()
+                reason_detail = "stale_sensor" if stale else "sensor_read_failure"
+                self._report("OBSTACLE", {"sensor": reason_detail}, severity="DANGER")
+                return self._decide({
+                    "applied": False,
+                    "reason": "obstacle",
+                    "detail": {"sensor": reason_detail},
+                })
+
         # Cliff check: only block when actually commanding movement.
         # Zero/near-zero stop commands must NOT trigger cliff warnings —
         # the sensor fires continuously from fixed obstacles near the dock.
@@ -283,16 +303,9 @@ class SafetyLayer:
                                                 "threshold_m": rear_stop}})
 
         # 6) Speed clamp (runtime-configurable ceiling)
-        # Allow full power (100%) if in MANUAL mode (boost handled by app)
-        # otherwise clamp to the configured ceiling for autonomy.
-        if mode != "MANUAL":
-            max_abs = 100.0 * cfg.get("max_speed_multiplier")
-            left_pct = max(-max_abs, min(max_abs, left_pct))
-            right_pct = max(-max_abs, min(max_abs, right_pct))
-        else:
-            # In MANUAL, trust the operator's request up to hardware limits
-            left_pct = max(-100.0, min(100.0, left_pct))
-            right_pct = max(-100.0, min(100.0, right_pct))
+        max_abs = 100.0 * cfg.get("max_speed_multiplier")
+        left_pct = max(-max_abs, min(max_abs, left_pct))
+        right_pct = max(-max_abs, min(max_abs, right_pct))
 
         # All checks passed → apply
         apply_fn = self._motor_apply

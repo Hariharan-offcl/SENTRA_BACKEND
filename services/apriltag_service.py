@@ -205,7 +205,8 @@ def inject_detection(tag_id: int, distance_m: float | None = None,
     # Feed injected simulation detections into localization filter too
     try:
         from services import localization_service
-        localization_service.update(det)
+        for _ in range(max(1, localization_service.CONFIRM_HITS)):
+            localization_service.update(det)
     except Exception:
         pass
     return det

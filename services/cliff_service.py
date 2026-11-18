@@ -58,14 +58,23 @@ _thread: threading.Thread | None = None
 
 def _init_hardware() -> None:
     """Link to the HAL's cliff sensor instead of claiming pins itself."""
-    global _simulated
+    global _simulated, _h
     from core.simulation import activate_once
     activate_once()
     
     if not CLIFF_ENABLED or core_config.SIMULATION:
         _simulated = True
         return
-        
+
+    try:
+        from hardware.gpio_manager import gpio_manager
+        left_ok = gpio_manager.claim_input(CLIFF_LEFT_GPIO, owner="cliff.service")
+        right_ok = gpio_manager.claim_input(CLIFF_RIGHT_GPIO, owner="cliff.service")
+        if left_ok and right_ok:
+            _h = gpio_manager.chip
+    except Exception:
+        pass
+
     try:
         from hardware.manager import hardware_manager
         cliff_hal = hardware_manager.cliff
@@ -76,7 +85,7 @@ def _init_hardware() -> None:
         logger.info("Cliff service linked to HAL (shared handle)")
     except Exception as exc:
         logger.warning("Cliff service linkage failed — simulated (%s)", exc)
-        _simulated = True
+        _simulated = _h is None
 
 
 def _read_once() -> tuple[bool, bool]:

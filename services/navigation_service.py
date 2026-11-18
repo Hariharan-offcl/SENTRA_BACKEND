@@ -185,8 +185,7 @@ def _state_seek(sess: dict) -> None:
         logger.warning("Nav %s: search timed out — entering recovery scan", sess["id"])
         _log_event({"event": "search_timeout", "target": sess["target"],
                     "recovery": True}, severity="WARNING")
-        # Strategy 2: attempt self-rescue before alerting caregiver
-        _set_state(sess, "RECOVERY_SCAN")
+        cancel("search_timeout")
         return
     det = _latest_detection(sess["tag_id"], max_age_s=core_config.PATROL_CONFIRM_FRESH_S)
     if det is not None:
@@ -565,7 +564,9 @@ def _arrived(sess: dict) -> None:
             final = _session.get("final_target") or hop["name"]
             # After final arrival, if search_person flag is set, transition to search.
             # We assume voice command sets this flag, but we'll default to it here if it's a person search.
-            if _session.get("search_person"):
+            has_person = _get_tracked_person() is not None
+            voice_without_person = (_session.get("source") == "voice" and not has_person)
+            if _session.get("search_person") and not voice_without_person:
                 _session["state"] = "PERSON_SEARCH"
                 _session["state_started_at"] = time.time()
                 _session["blocked_since"] = None

@@ -148,6 +148,22 @@ d = sl.check_and_apply("tester", MANUAL, 50, 50)
 check("runtime timeout triggers", d["applied"] is False and d["reason"] == "timeout", str(d))
 cfg.update({"manual_cmd_timeout_s": 0.6})
 
+# Missing sensor data and stale snapshots fail safe for active motion.
+old_provider = sl._sensor_provider
+sl.set_sensor_provider(lambda: {})
+d = sl.check_and_apply("tester", MANUAL, 50, 50)
+check("missing sensor data stops motion", d["applied"] is False
+      and d["detail"]["sensor"] == "sensor_read_failure", str(d))
+sl.set_sensor_provider(lambda: {
+    "timestamp": time.time() - 2.0,
+    "front_distance_m": 1.0,
+    "rear_distance_m": 1.0,
+})
+d = sl.check_and_apply("tester", MANUAL, 50, 50)
+check("stale sensor snapshot stops motion", d["applied"] is False
+      and d["detail"]["sensor"] == "stale_sensor", str(d))
+sl.set_sensor_provider(old_provider)
+
 print("\n[5] status() snapshot")
 status = sl.status()
 check("status keys", {"mode", "estop_active", "watchdog_active", "last_decision",

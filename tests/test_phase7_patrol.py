@@ -74,7 +74,7 @@ check("single-waypoint route rejected", r["ok"] is False, str(r))
 r = patrol_service.save_route("Round", ["Dock", "Hall", "Kitchen"])
 check("valid route saved", r["ok"] is True and r["created"] is True, str(r))
 check("first route became default", patrol_service.get_default_route() == "Round")
-r = patrol_service.save_route("Round", ["Dock", "Kitchen"], set_default=True)
+r = patrol_service.save_route("Round", ["Dock", "Kitchen"], set_default=True, loop=False)
 check("route updated", r["ok"] is True and r["created"] is False)
 check("route update persisted (in memory)", patrol_service.get_route("Round") == ["Dock", "Kitchen"])
 

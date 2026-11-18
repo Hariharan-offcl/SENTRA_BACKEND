@@ -190,6 +190,7 @@ def _context_model() -> dict:
         rear  = snap.get("rear_distance_m")
     return {
         "imu":            snap.get("imu", {}) or {},
+        "wheel_encoders": snap.get("wheel_encoders", {}) or {},
         "front_distance_m": front,
         "rear_distance_m":  rear,
     }

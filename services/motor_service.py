@@ -363,9 +363,15 @@ def _patrol_loop():
 
         if st.get_mode() == PATROL and not st.is_estop_active():
             try:
-                from services.telemetry_service import _sim
-                front = _sim["ultrasonic"]["front_distance_m"]
-                rear = _sim["ultrasonic"]["rear_distance_m"]
+                from services.sensor_service import sensor_provider
+                sensors = sensor_provider()
+                front = sensors.get("front_distance_m")
+                rear = sensors.get("rear_distance_m")
+
+                if not isinstance(front, (int, float)):
+                    front = float("inf")
+                if not isinstance(rear, (int, float)):
+                    rear = float("inf")
 
                 if front < get_safety_config().get("patrol_obstacle_m"):
                     # SAFETY RULE: obstacle during autonomy → STOP first.

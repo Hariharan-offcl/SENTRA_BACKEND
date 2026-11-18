@@ -135,7 +135,8 @@ def _dispatch_go_to_dock() -> dict:
     result = docking_service.start_return(docked_by="voice")
     if not result.get("ok"):
         return {"handled": False, "error": result.get("error", "dock_unavailable")}
-    return {"handled": True, "action": "return_to_dock", "state": "RETURN_TO_DOCK"}
+    return {"handled": True, "action": "return_to_dock",
+            "target": "Dock", "state": "RETURN_TO_DOCK"}
 
 
 def _dispatch_start_patrol() -> dict:

@@ -6,6 +6,39 @@ from hardware.manager import hardware_manager
 
 logger = logging.getLogger(__name__)
 
+_h = None
+ULTRASONIC_FRONT_TRIGGER_GPIO = 24
+ULTRASONIC_FRONT_ECHO_GPIO = 25
+ULTRASONIC_REAR_TRIGGER_GPIO = 5
+ULTRASONIC_REAR_ECHO_GPIO = 6
+
+
+def _init_hardware() -> None:
+    """Compatibility initializer that claims ultrasonic pins on the shared GPIO handle."""
+    global _h
+    from core.simulation import activate_once
+    activate_once()
+    from core import config as core_config
+    if core_config.SIMULATION:
+        _h = None
+        return
+    try:
+        from hardware.gpio_manager import gpio_manager
+        h = gpio_manager.chip
+        if h is None:
+            _h = None
+            return
+        ok = (
+            gpio_manager.claim_output(ULTRASONIC_FRONT_TRIGGER_GPIO, owner="ultrasonic.service", initial=0)
+            and gpio_manager.claim_input(ULTRASONIC_FRONT_ECHO_GPIO, owner="ultrasonic.service")
+            and gpio_manager.claim_output(ULTRASONIC_REAR_TRIGGER_GPIO, owner="ultrasonic.service", initial=0)
+            and gpio_manager.claim_input(ULTRASONIC_REAR_ECHO_GPIO, owner="ultrasonic.service")
+        )
+        _h = h if ok else None
+    except Exception as exc:
+        logger.warning("Ultrasonic GPIO compatibility init failed: %s", exc)
+        _h = None
+
 def _ultrasonic_loop():
     from services.telemetry_service import _US_SIM
     

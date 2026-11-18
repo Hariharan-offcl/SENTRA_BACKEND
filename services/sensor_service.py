@@ -63,7 +63,7 @@ def _build_once() -> None:
     daemon threads own the hardware reads; this aggregator never blocks).
     Distances come from telemetry_service._US_SIM, kept current by the
     ultrasonic service loop."""
-    from services import cliff_service, current_service, imu_service
+    from services import cliff_service, current_service, imu_service, encoder_service
     from services.telemetry_service import _US_SIM
 
     ultra_last = _US_SIM.get("last_read", 0.0)
@@ -71,6 +71,7 @@ def _build_once() -> None:
     cliff_frag = cliff_service.sensor_provider()
     curr_frag  = current_service.sensor_provider()
     imu_frag   = imu_service.sensor_provider()
+    encoder_frag = encoder_service.sensor_provider()
 
     snap = {
         "front_distance_m": _US_SIM.get("front_distance_m"),
@@ -79,6 +80,7 @@ def _build_once() -> None:
         "right_cliff":      bool(cliff_frag["right_cliff"]),
         "imu":              imu_frag["imu"],
         "current":          curr_frag["current"],
+        "wheel_encoders":   encoder_frag["wheel_encoders"],
         "timestamp":        time.time(),
     }
 
@@ -94,6 +96,10 @@ def _build_once() -> None:
         "current": _health_of(enabled=bool(curr_frag.get("current_enabled", True)),
                                      simulated=bool(curr_frag.get("current_simulated", True)),
                                      last_read=curr_frag.get("current_last_read")),
+        "wheel_encoders": _health_of(
+            enabled=bool(encoder_frag.get("encoders_enabled", True)),
+            simulated=bool(encoder_frag.get("encoders_simulated", True)),
+            last_read=encoder_frag.get("encoders_last_read")),
     }
 
     with _lock:
@@ -158,4 +164,5 @@ def sensor_provider() -> dict:
         "rear_distance_m":  snap["rear_distance_m"],
         "left_cliff":       bool(snap["left_cliff"]),
         "right_cliff":      bool(snap["right_cliff"]),
+        "timestamp":        snap["timestamp"],
     }
