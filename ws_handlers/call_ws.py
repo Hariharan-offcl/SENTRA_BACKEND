@@ -48,7 +48,7 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
     if role == "node":
         age = time.time() - _user_ready_since
         if 0 < age < _USER_READY_TTL_S:
-            logger.info("Rover connected after user ready – relaying peer-ready to rover")
+            logger.info("Rover connected after user ready -- relaying peer-ready to rover")
             try:
                 await websocket.send_json({"type": "peer-ready", "role": "user"})
             except Exception:
@@ -75,7 +75,7 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
             if message_type == "ready":
                 peer = call_service.webrtc_clients[peer_role]
                 if peer is not None:
-                    # Peer is online – normal flow: tell sender their peer is ready
+                    # Peer is online - normal flow: tell sender their peer is ready
                     # and tell peer that this side is ready (triggering offer from rover).
                     await websocket.send_json({"type": "peer-ready", "role": peer_role})
                     await call_service.broadcast_signal(
@@ -85,10 +85,10 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
                     if role == "user":
                         _user_ready_since = 0.0  # rover is online, no need to cache
                 else:
-                    # Peer not yet connected – remember that user is ready.
+                    # Peer not yet connected - remember that user is ready.
                     if role == "user":
                         _user_ready_since = time.time()
-                        logger.info("User sent 'ready' but rover not connected yet – cached")
+                        logger.info("User sent 'ready' but rover not connected yet -- cached")
                 continue
 
             forwarded = {"type": message_type, "from": role}
@@ -126,7 +126,7 @@ async def call_socket(websocket: WebSocket, role: str):
     if role not in call_service.call_clients:
         await websocket.close(code=1008, reason="role must be 'node' or 'user'")
         return
-    # Phase 4: token gate (?token=) â€” 4401 when enforced and missing/bad.
+    # Phase 4: token gate (?token=) - 4401 when enforced and missing/bad.
     from core import auth as core_auth
     if await core_auth.verify_ws_token(websocket) is None:
         return
