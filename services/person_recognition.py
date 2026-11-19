@@ -180,7 +180,7 @@ def detect_faces(frame) -> list[tuple[int, int, int, int]]:
         return []
 
 
-def recognize_frame(frame) -> dict:
+def recognize_frame(frame, *, from_rover: bool = False) -> dict:
     """
     One-shot recognition on a full frame (used by POST /persons/recognize
     and by the worker). Returns:
@@ -217,6 +217,7 @@ def recognize_frame(frame) -> dict:
             safety_events.report("PERSON_UNKNOWN", {
                 "faces": unknown,
                 "snapshot": os.path.basename(path) if path else None,
+                "from_rover": from_rover,
             }, severity="DANGER")
         except Exception:
             pass
@@ -258,7 +259,7 @@ def _worker_loop() -> None:
         with _stats_lock:
             _stats["frames_seen"] += 1
         try:
-            recognize_frame(frame)
+            recognize_frame(frame, from_rover=True)
             with _stats_lock:
                 if _stats["faces_seen"] > 0:
                     _stats["last_face_age_s"] = 0.0

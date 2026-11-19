@@ -103,15 +103,23 @@ def push_event(event: str, data: dict) -> None:
 
 # ── Safety events → alert / emergency (instant push) ─────────────────────────
 
-def _on_safety_event(event: dict) -> None:
+def _on_safety_event(event: dict, notification: dict | None = None) -> None:
     try:
         from services import notification_service
-        n = notification_service.from_safety_event(event)
+        n = notification or notification_service.from_safety_event(event)
         if n is None:
             return
         push_event("alert", cm.alert_object(n))
         if event.get("severity") == "DANGER":
             push_event("emergency", cm.emergency_object(n))
+        if (event.get("type") == "PERSON_UNKNOWN"
+                and event.get("detail", {}).get("from_rover") is True):
+            from routers import compat
+            compat.start_ringing_call(
+                cm.ROBOT_ID,
+                emergency=True,
+                source_alert_id=n["id"] if notification is not None else None,
+            )
     except Exception as exc:
         logger.error("compat safety push failed: %s", exc)
 

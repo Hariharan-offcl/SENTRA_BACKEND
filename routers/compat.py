@@ -921,22 +921,30 @@ def _call_object(call: dict) -> dict:
     }
 
 
-@router.post("/calls/initiate")
-def call_initiate(body: dict):
-    """App spec §14a: create a ringing call + push call_incoming on /ws."""
+def start_ringing_call(robot_id: str, *, emergency: bool = False,
+                       source_alert_id: str | None = None) -> dict:
     import uuid
-    body = body or {}
-    robot_id = str(body.get("robot_id", "")).strip() or cm.ROBOT_ID
-    _expire_ringing_calls()
-    call = {
+    return register_call({
         "id": f"call-{uuid.uuid4().hex[:8]}",
         "robot_id": robot_id,
         "status": "ringing",
-        "call_type": "emergency" if body.get("call_type") == "emergency" or body.get("alert_id") else "manual",
-        "source_alert_id": body.get("alert_id"),
+        "call_type": "emergency" if emergency else "manual",
+        "source_alert_id": source_alert_id,
         "started_at": time.time(),
-    }
-    call = register_call(call)
+    })
+
+
+@router.post("/calls/initiate")
+def call_initiate(body: dict):
+    """App spec §14a: create a ringing call + push call_incoming on /ws."""
+    body = body or {}
+    robot_id = str(body.get("robot_id", "")).strip() or cm.ROBOT_ID
+    alert_id = body.get("alert_id")
+    call = start_ringing_call(
+        robot_id,
+        emergency=body.get("call_type") == "emergency" or bool(alert_id),
+        source_alert_id=alert_id,
+    )
     # Bridge into the emergency-call lifecycle when a session exists (fall).
     try:
         from services import emergency_call

@@ -120,7 +120,6 @@ async def lifespan(app: FastAPI):
     from services import notification_service
     notification_service.load()   # ~/sentra_data/notifications.json
     notification_service.attach_loop(asyncio.get_running_loop())
-    safety_events.add_listener(notification_service.notify_safety_event)
 
     # ── Phase 4: Start mapping recording loop ──────────────────────────
     from services import mapping_service
@@ -137,7 +136,13 @@ async def lifespan(app: FastAPI):
     safety_events.add_listener(relay_client._on_safety_event)  # DANGER push
     # ── Phase 21: final app spec socket — alert/emergency instant push ──
     from ws_handlers import compat_ws
-    safety_events.add_listener(compat_ws._on_safety_event)
+    loop = asyncio.get_running_loop()
+
+    def notify_caregiver(event: dict) -> None:
+        notification = notification_service.notify_safety_event(event)
+        loop.call_soon_threadsafe(compat_ws._on_safety_event, event, notification)
+
+    safety_events.add_listener(notify_caregiver)
     relay_client.start()
     safety_events.attach_loop(asyncio.get_running_loop())
 
