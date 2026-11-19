@@ -1,6 +1,7 @@
 from typing import Dict, Set, Optional
 from fastapi import WebSocket
 import logging
+import time
 
 logger = logging.getLogger("sentra.connection_manager")
 
@@ -26,6 +27,21 @@ class ConnectionManager:
         if websocket in self.active_connections:
             conn_info = self.active_connections.pop(websocket)
             logger.info(f"Client disconnected: role={conn_info['role']}, id={conn_info['user_id']}")
+
+    def note_heartbeat(self, websocket: WebSocket) -> None:
+        info = self.active_connections.get(websocket)
+        if info is not None:
+            info["last_heartbeat"] = time.time()
+
+    def stale_heartbeats(self, max_age_s: float = 5.0) -> list[dict]:
+        now = time.time()
+        stale = []
+        for websocket, info in list(self.active_connections.items()):
+            last = info.get("last_heartbeat", 0.0)
+            if last and now - last > max_age_s:
+                stale.append({"role": info["role"], "user_id": info["user_id"],
+                              "age_s": round(now - last, 2)})
+        return stale
 
     async def send_personal_message(self, message: dict, websocket: WebSocket):
         await websocket.send_json(message)

@@ -103,11 +103,7 @@ def _sampler_loop() -> None:
             subs = list(_subscribers)
         for sub in subs:
             q = sub["queue"]
-            if len(q) == q.maxlen:
-                try:
-                    q.popleft()  # drop oldest
-                except IndexError:
-                    pass
+            q.clear()
             q.append((frame, frame_id))
 
         # Drain queues → callbacks (from sampler thread; consumers must be fast)
@@ -125,6 +121,16 @@ def _sampler_loop() -> None:
 
         with _stats_lock:
             _stats["frames_sampled"] += 1
+        try:
+            from services import event_bus
+            event_bus.publish(
+                "FRAME_SAMPLED",
+                {"frame_id": frame_id, "subscribers": len(subs)},
+                dedupe_key=f"frame:{frame_id}",
+                dedupe_s=0.0,
+            )
+        except Exception:
+            pass
         _stop_event.wait(1.0 / SAMPLER_HZ)
 
 

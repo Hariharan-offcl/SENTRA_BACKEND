@@ -98,6 +98,17 @@ def report(event_type: str, detail: dict | None = None,
         }
         _history.append(event)
 
+    try:
+        from services import event_bus
+        event_bus.publish(
+            event_type,
+            dict(detail or {}),
+            dedupe_key=f"domain:{event_type}:{location}",
+            dedupe_s=DEBOUNCE_S,
+            severity=severity,
+        )
+    except Exception as exc:
+        logger.debug("domain event publish failed: %s", exc)
     _enqueue(event)
     for fn in list(_listeners):
         try:

@@ -87,10 +87,16 @@ def current_location_name() -> str | None:
 def robot_object() -> dict:
     """App spec §3a robot object for this (single) unit."""
     st = get_robot_state()
+    try:
+        from ws_handlers.app_ws import _rover_state
+        last = _rover_state.get("last_heartbeat", 0.0)
+        status = "online" if last and time.time() - float(last) < 5.0 else "offline"
+    except Exception:
+        status = "online"
     return {
         "id": ROBOT_ID,
         "name": settings.unit_name,
-        "status": "online",
+        "status": status,
         "battery_level": battery_percent(),
         "current_mode": app_mode(),
         "last_seen": iso(time.time()),
@@ -197,12 +203,17 @@ def emergency_object(n: dict) -> dict:
 def telemetry_event() -> dict:
     """App spec §4 telemetry event data."""
     st = get_robot_state()
+    from services import demo_state
+    from services import event_bus
+    state = demo_state.snapshot()
     return {
         "battery_percent": battery_percent(),
         "mode": app_mode(),
         "connection_status": "connected",
         "is_emergency": bool(st.is_estop_active()),
         "current_location": current_location_name(),
+        "demo_state": state,
+        "event_bus": event_bus.stats(),
     }
 
 

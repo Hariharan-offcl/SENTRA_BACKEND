@@ -33,6 +33,7 @@ Standard envelopes: success → {"data": ...}; error → {"detail": "..."}.
 import logging
 import os
 import secrets
+import threading
 import time
 
 from fastapi import APIRouter, HTTPException, Request
@@ -818,22 +819,104 @@ def delete_person_compat(person_id: str):
 # ── 14. Video calling ─────────────────────────────────────────────────────────
 
 _calls: dict[str, dict] = {}
+_CALL_RING_TIMEOUT_S = 45.0
+_call_lock = threading.RLock()
+_call_expiry_timers: dict[str, threading.Timer] = {}
 
 
-def register_call(call: dict) -> None:
+def _call_ended_event(call: dict, status: str) -> dict:
+    return {**_call_object(call), "status": status}
+
+
+def _cancel_call_expiry(call_id: str) -> None:
+    with _call_lock:
+        timer = _call_expiry_timers.pop(call_id, None)
+    if timer is not None:
+        timer.cancel()
+
+
+def _expire_call_timer(call_id: str) -> None:
+    from ws_handlers import compat_ws
+
+    expired = None
+    with _call_lock:
+        call = _calls.get(call_id)
+        if call is None or call.get("status") != "ringing":
+            _call_expiry_timers.pop(call_id, None)
+            return
+        remaining = _CALL_RING_TIMEOUT_S - (time.time() - float(call["started_at"]))
+        if remaining > 0:
+            timer = threading.Timer(remaining, _expire_call_timer, args=(call_id,))
+            timer.daemon = True
+            _call_expiry_timers[call_id] = timer
+            timer.start()
+            return
+        call["status"] = "missed"
+        _call_expiry_timers.pop(call_id, None)
+        expired = dict(call)
+
+    compat_ws.push_event("call_ended", _call_ended_event(expired, "missed"))
+
+
+def _schedule_call_expiry(call: dict) -> None:
+    delay = max(
+        0.0,
+        _CALL_RING_TIMEOUT_S - (time.time() - float(call["started_at"])),
+    )
+    timer = threading.Timer(delay, _expire_call_timer, args=(call["id"],))
+    timer.daemon = True
+    with _call_lock:
+        previous = _call_expiry_timers.pop(call["id"], None)
+        _call_expiry_timers[call["id"]] = timer
+    if previous is not None:
+        previous.cancel()
+    timer.start()
+
+
+def _expire_ringing_calls(now: float | None = None) -> None:
+    from ws_handlers import compat_ws
+
+    current_time = time.time() if now is None else now
+    expired = []
+    with _call_lock:
+        for call in _calls.values():
+            if (call.get("status") == "ringing"
+                    and current_time - float(call.get("started_at", current_time))
+                    >= _CALL_RING_TIMEOUT_S):
+                call["status"] = "missed"
+                timer = _call_expiry_timers.pop(call["id"], None)
+                if timer is not None:
+                    timer.cancel()
+                expired.append(dict(call))
+    for call in expired:
+        compat_ws.push_event("call_ended", _call_ended_event(call, "missed"))
+
+
+def register_call(call: dict) -> dict:
     """Store a call + push call_incoming. Used by REST initiate AND the WS
     CALL_USER voice path (ws_handlers/app_ws.py)."""
-    _calls[call["id"]] = call
+    _expire_ringing_calls()
+    with _call_lock:
+        for existing in _calls.values():
+            if (existing.get("robot_id") == call.get("robot_id")
+                    and existing.get("status") in ("ringing", "active")):
+                return existing
+        _calls[call["id"]] = call
+    _schedule_call_expiry(call)
     from ws_handlers import compat_ws
-    compat_ws.push_event("call_incoming",
-                         {"callId": call["id"], "robotId": call["robot_id"]})
+    compat_ws.push_event("call_incoming", _call_object(call))
+    return call
 
 
 def _call_object(call: dict) -> dict:
     return {
         "id": call["id"],
+        "callId": call["id"],
         "robot_id": call["robot_id"],
+        "robotId": call["robot_id"],
         "status": call["status"],
+        "call_type": call.get("call_type", "manual"),
+        "source_alert_id": call.get("source_alert_id"),
         "started_at": cm.iso(call["started_at"]),
     }
 
@@ -842,18 +925,18 @@ def _call_object(call: dict) -> dict:
 def call_initiate(body: dict):
     """App spec §14a: create a ringing call + push call_incoming on /ws."""
     import uuid
-    from ws_handlers import compat_ws
     body = body or {}
     robot_id = str(body.get("robot_id", "")).strip() or cm.ROBOT_ID
+    _expire_ringing_calls()
     call = {
         "id": f"call-{uuid.uuid4().hex[:8]}",
         "robot_id": robot_id,
         "status": "ringing",
+        "call_type": "emergency" if body.get("call_type") == "emergency" or body.get("alert_id") else "manual",
+        "source_alert_id": body.get("alert_id"),
         "started_at": time.time(),
     }
-    _calls[call["id"]] = call
-    compat_ws.push_event("call_incoming",
-                         {"callId": call["id"], "robotId": robot_id})
+    call = register_call(call)
     # Bridge into the emergency-call lifecycle when a session exists (fall).
     try:
         from services import emergency_call
@@ -875,13 +958,21 @@ def _get_call(call_id: str) -> dict:
 @router.get("/calls/{call_id}")
 def get_call(call_id: str):
     """Phase 1 contract: call polling for the call screen."""
+    _expire_ringing_calls()
     return _ok(_call_object(_get_call(call_id)))
 
 
 @router.post("/calls/{call_id}/accept")
 def call_accept(call_id: str):
-    call = _get_call(call_id)
-    call["status"] = "active"
+    from ws_handlers import compat_ws
+    _expire_ringing_calls()
+    with _call_lock:
+        call = _get_call(call_id)
+        if call.get("status") != "ringing":
+            raise HTTPException(status_code=409, detail="call is no longer ringing")
+        call["status"] = "active"
+    _cancel_call_expiry(call_id)
+    compat_ws.push_event("call_accepted", _call_object(call))
     # Answering from the app also acknowledges any live emergency-call
     # session — without this the rover kept ringing after the user picked up
     # (the session only reacted to WebRTC presence, which fires later).
@@ -895,8 +986,15 @@ def call_accept(call_id: str):
 
 @router.post("/calls/{call_id}/reject")
 def call_reject(call_id: str):
-    call = _get_call(call_id)
-    call["status"] = "missed"
+    from ws_handlers import compat_ws
+    _expire_ringing_calls()
+    with _call_lock:
+        call = _get_call(call_id)
+        if call.get("status") != "ringing":
+            raise HTTPException(status_code=409, detail="call is no longer ringing")
+        call["status"] = "rejected"
+    _cancel_call_expiry(call_id)
+    compat_ws.push_event("call_ended", _call_object(call))
     # Rejecting stops the emergency ring too (same ack path as accept).
     try:
         from services import emergency_call
@@ -909,7 +1007,14 @@ def call_reject(call_id: str):
 @router.post("/calls/{call_id}/end")
 def call_end(call_id: str):
     from ws_handlers import compat_ws
-    call = _get_call(call_id)
-    call["status"] = "ended"
-    compat_ws.push_event("call_ended", {"callId": call["id"]})
+    with _call_lock:
+        call = _get_call(call_id)
+        call["status"] = "ended"
+    _cancel_call_expiry(call_id)
+    compat_ws.push_event("call_ended", _call_object(call))
+    try:
+        from services import emergency_call
+        emergency_call.ack("ended via app")
+    except Exception:
+        pass
     return _ok(_call_object(call))

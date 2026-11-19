@@ -119,7 +119,7 @@ check("token revoked after logout", st == 401, str(st))
 print("\n[3] robots + modes")
 st, r = call("GET", "/api/robots")
 check("robot list shape", st == 200 and r[0]["id"] == "sentra-01"
-      and r[0]["status"] == "online" and r[0]["current_mode"] in
+      and r[0]["status"] in ("online", "offline") and r[0]["current_mode"] in
       ("idle", "manual", "mapping", "patrol", "auto", "docking"), str(r)[:200])
 st, r = call("GET", "/api/robots/sentra-01")
 check("single robot", st == 200 and r["id"] == "sentra-01")

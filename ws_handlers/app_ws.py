@@ -197,6 +197,7 @@ async def _handle_command(ws: WebSocket, data: dict) -> None:
 
 
 async def _handle_heartbeat(ws: WebSocket, data: dict, is_rover: bool) -> None:
+    connection_manager.note_heartbeat(ws)
     if is_rover:
         _rover_state.update({
             "last_heartbeat": time.time(),
@@ -204,14 +205,25 @@ async def _handle_heartbeat(ws: WebSocket, data: dict, is_rover: bool) -> None:
             "camera_state": data.get("camera_state"),
             "battery_percent": data.get("battery_percent"),
         })
+        push_event("heartbeat_ack", {
+            "mode": data.get("mode"),
+            "current_command": data.get("current_command"),
+            "camera_state": data.get("camera_state"),
+            "microphone_state": data.get("microphone_state"),
+            "battery_percent": data.get("battery_percent"),
+            "latency_ms": data.get("latency_ms"),
+            "ts": int(time.time() * 1000),
+        })
     await send_event(ws, "heartbeat_ack", {})
 
 
 async def _handle_resync(ws: WebSocket) -> None:
     """Re-push the full state so a reconnected phone never shows stale data."""
+    from services import demo_state
     await send_event(ws, "telemetry", cm.telemetry_event())
     await send_event(ws, "sensor_update", cm.sensor_event())
     await send_event(ws, "navigation_status", cm.navigation_event())
+    await send_event(ws, "demo_state", demo_state.snapshot())
 
 
 async def _handle_camera_frame(ws: WebSocket, data: dict) -> None:
@@ -299,7 +311,7 @@ def _create_call() -> dict:
         "started_at": time.time(),
     }
     from routers import compat
-    compat.register_call(call)  # stores + pushes call_incoming
+    call = compat.register_call(call)
     return {"id": call["id"], "status": call["status"]}
 
 

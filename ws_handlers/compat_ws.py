@@ -216,6 +216,12 @@ async def _recv_loop(ws: WebSocket) -> None:
 
         if event == "ping":
             await send_event(ws, "pong", {})
+        elif event == "resync":
+            await send_event(ws, "telemetry", cm.telemetry_event())
+            await send_event(ws, "sensor_update", cm.sensor_event())
+            await send_event(ws, "navigation_status", cm.navigation_event())
+            from services import demo_state
+            await send_event(ws, "demo_state", demo_state.snapshot())
         elif event == "control_move":
             _handle_control_move(data)
         elif event == "control_stop":

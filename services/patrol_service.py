@@ -197,6 +197,16 @@ def _engine_loop() -> None:
             _engine_stop.wait(ENGINE_TICK_S)
             continue
 
+        clear, path_reason = _path_is_clear(get_safety_layer_sensors())
+        with _lock:
+            if _session and _session["id"] == session["id"]:
+                _session["blocked"] = not clear
+                _session["blocked_since"] = time.time() if not clear else None
+                if not clear:
+                    _session["blocked_reason"] = path_reason
+                else:
+                    _session.pop("blocked_reason", None)
+
         st = get_robot_state()
         route_name = session["route"]
         waypoints = session["waypoints"]
@@ -322,6 +332,16 @@ def _engine_loop() -> None:
                         _session["blocked_since"] = time.time()
                     elif not blocked:
                         _session["blocked_since"] = None
+
+        # Reassert direct safety blockage at the end of the loop. This prevents
+        # stale navigation snapshots from clearing a newly observed obstacle.
+        clear_after, reason_after = _path_is_clear(get_safety_layer_sensors())
+        with _lock:
+            if _session and _session["id"] == session["id"]:
+                if not clear_after:
+                    _session["blocked"] = True
+                    _session["blocked_since"] = _session.get("blocked_since") or time.time()
+                    _session["blocked_reason"] = reason_after
 
         _engine_stop.wait(ENGINE_TICK_S)
 
@@ -483,6 +503,18 @@ def _session_status() -> Optional[dict]:
     with _lock:
         if _session is None:
             return None
+        try:
+            clear, reason = _path_is_clear(get_safety_layer_sensors())
+            if not clear:
+                _session["blocked"] = True
+                _session["blocked_since"] = _session.get("blocked_since") or time.time()
+                _session["blocked_reason"] = reason
+            else:
+                _session["blocked"] = False
+                _session["blocked_since"] = None
+                _session.pop("blocked_reason", None)
+        except Exception:
+            pass
         sess = dict(_session)
         sess["progress"] = f"{sess['index']}/{len(sess['waypoints'])}"
         sess["current_waypoint"] = (sess["waypoints"][sess["index"]]
