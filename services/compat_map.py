@@ -253,11 +253,11 @@ def apriltag_event(det: dict) -> dict:
 
 
 def person_event(track: dict) -> dict:
-    """App spec §11 person_detected event data (body tracks are un-identified)."""
+    """App spec §11 person_detected event data."""
     return {
-        "is_known": False,
+        "is_known": bool(track.get("is_known")),
         "person_id": str(track.get("person_id")),
-        "name": None,
+        "name": track.get("name") if track.get("is_known") else None,
         "confidence": track.get("confidence"),
         "image_url": None,
     }

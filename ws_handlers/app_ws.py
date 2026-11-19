@@ -34,6 +34,7 @@ import time
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from core import auth as core_auth
+from services import device_registry
 from services import compat_map as cm
 from services import motor_service
 from services.connection_manager import connection_manager
@@ -256,13 +257,16 @@ async def _handle_camera_frame(ws: WebSocket, data: dict) -> None:
 
 # ── Shared push loop (per connection) ────────────────────────────────────────
 
-async def _push_loop(ws: WebSocket) -> None:
+async def _push_loop(ws: WebSocket, jti: str | None = None) -> None:
     last_sensors = 0.0
     last_nav_sig = None
     last_tags_sig = None
     last_persons_sig = None
     from services import telemetry_service
     while True:
+        if jti and device_registry.token_state(jti) != "active":
+            await ws.close(code=4401)
+            return
         await send_event(ws, "telemetry", telemetry_service.get_ws_telemetry_payload())
         now = time.time()
         if now - last_sensors >= 0.5:
@@ -283,7 +287,8 @@ async def _push_loop(ws: WebSocket) -> None:
         # person_detected — only on tracked-set change
         from services import person_detection
         tracks = person_detection.get_tracked()
-        psig = tuple(sorted((t["person_id"], round(t.get("confidence") or 0, 2))
+        psig = tuple(sorted((t["person_id"], round(t.get("confidence") or 0, 2),
+                             bool(t.get("is_known")), t.get("name") or "")
                             for t in tracks))
         if psig != last_persons_sig:
             last_persons_sig = psig
@@ -332,6 +337,10 @@ async def _app_socket(ws: WebSocket, is_rover: bool) -> None:
             await ws.close(code=4401)
             logger.info("%s denied (bad token): %s", channel, exc)
             return
+        if (ctx.kind == "node") != is_rover:
+            await ws.accept()
+            await ws.close(code=4401)
+            return
         device_id = ctx.device_id
     else:
         device_id = token or f"anon-{id(ws)}"
@@ -343,10 +352,18 @@ async def _app_socket(ws: WebSocket, is_rover: bool) -> None:
     if is_rover:
         _rover_state["last_heartbeat"] = time.time()
 
-    pusher = asyncio.create_task(_push_loop(ws))
+    jti = ctx.jti if core_auth.AUTH_ENFORCED else None
+    pusher = asyncio.create_task(_push_loop(ws, jti))
     try:
+        if not is_rover:
+            from routers import compat
+            for call in compat.ringing_calls():
+                await send_event(ws, "call_incoming", call)
         while True:
             raw = await ws.receive_text()
+            if jti and device_registry.token_state(jti) != "active":
+                await ws.close(code=4401)
+                break
             try:
                 mtype, data = _flat_inbound(raw)
             except json.JSONDecodeError:

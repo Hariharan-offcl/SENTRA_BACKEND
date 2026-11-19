@@ -72,6 +72,8 @@ def auth_login(body: dict):
         raise HTTPException(status_code=401, detail="invalid credentials")
     app_role = "user" if str((body or {}).get("role", "admin")).lower() == "user" else "admin"
     internal_role = cm.APP_ROLE_TO_INTERNAL[app_role]
+    if (device_registry.get_device(username) or {}).get("kind") == "node":
+        raise HTTPException(status_code=409, detail="username is reserved for a rover")
     try:
         session = core_auth.issue_session(username, internal_role)
     except PermissionError as exc:
@@ -906,6 +908,13 @@ def register_call(call: dict) -> dict:
     from ws_handlers import compat_ws
     compat_ws.push_event("call_incoming", _call_object(call))
     return call
+
+
+def ringing_calls() -> list[dict]:
+    _expire_ringing_calls()
+    with _call_lock:
+        return [_call_object(call) for call in _calls.values()
+                if call["status"] == "ringing"]
 
 
 def _call_object(call: dict) -> dict:

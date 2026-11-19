@@ -39,7 +39,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from core import auth as core_auth
 from core import config as core_config
 from services import compat_map as cm
-from services import motor_service
+from services import device_registry, motor_service
 from services.connection_manager import connection_manager
 
 router = APIRouter(tags=["WebSocket"])
@@ -155,7 +155,7 @@ def _handle_estop() -> None:
 
 # ── Push loops ───────────────────────────────────────────────────────────────
 
-async def _push_loop(ws: WebSocket) -> None:
+async def _push_loop(ws: WebSocket, jti: str | None = None) -> None:
     """All periodic pushes for one client in a single task."""
     last_sensors = time.time()
     last_tags_sig = None
@@ -163,6 +163,9 @@ async def _push_loop(ws: WebSocket) -> None:
     last_nav = ""
 
     while True:
+        if jti and device_registry.token_state(jti) != "active":
+            await ws.close(code=4401)
+            return
         await send_event(ws, "telemetry", cm.telemetry_event())
 
         now = time.time()
@@ -183,7 +186,8 @@ async def _push_loop(ws: WebSocket) -> None:
         # person_detected — only on tracked-set change
         from services import person_detection
         tracks = person_detection.get_tracked()
-        psig = tuple(sorted((t["person_id"], round(t.get("confidence") or 0, 2))
+        psig = tuple(sorted((t["person_id"], round(t.get("confidence") or 0, 2),
+                             bool(t.get("is_known")), t.get("name") or "")
                             for t in tracks))
         if psig != last_persons_sig:
             last_persons_sig = psig
@@ -214,9 +218,12 @@ def _flat_inbound(raw: str) -> tuple[str, dict]:
         return str(msg["event"]), dict(msg.get("data") or {})
     return "", {}
 
-async def _recv_loop(ws: WebSocket) -> None:
+async def _recv_loop(ws: WebSocket, jti: str | None = None) -> None:
     while True:
         raw = await ws.receive_text()
+        if jti and device_registry.token_state(jti) != "active":
+            await ws.close(code=4401)
+            return
         try:
             event, data = _flat_inbound(raw)
         except json.JSONDecodeError:
@@ -260,15 +267,23 @@ async def compat_app_socket(websocket: WebSocket):
             await websocket.accept()
             await websocket.close(code=4401)
             return
+        if ctx.kind == "node":
+            await websocket.accept()
+            await websocket.close(code=4401)
+            return
         device_id = ctx.device_id
     else:
         device_id = token or f"anon-{id(websocket)}"
 
     await connection_manager.connect(websocket, role="USER", user_id=device_id)
     _clients.add(websocket)
-    pusher = asyncio.create_task(_push_loop(websocket))
+    jti = ctx.jti if core_auth.AUTH_ENFORCED else None
+    pusher = asyncio.create_task(_push_loop(websocket, jti))
     try:
-        await _recv_loop(websocket)
+        from routers import compat
+        for call in compat.ringing_calls():
+            await send_event(websocket, "call_incoming", call)
+        await _recv_loop(websocket, jti)
     except WebSocketDisconnect:
         pass
     except Exception as exc:

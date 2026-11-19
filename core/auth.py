@@ -93,7 +93,8 @@ class AuthContext:
         self.jti = jti
 
 
-def issue_session(device_id: str, role: str) -> dict:
+def issue_session(device_id: str, role: str, *,
+                  replaces: str | None = None) -> dict:
     """Create access+refresh tokens for a device/role and track them."""
     permissions = ROLE_PERMISSIONS.get(role)
     if permissions is None:
@@ -121,7 +122,7 @@ def issue_session(device_id: str, role: str) -> dict:
                        algorithm=settings.jwt_algorithm)
     device_registry.register_token(jti, device_id,
                                    ttl_s=settings.jwt_expire_seconds,
-                                   refresh_token=refresh_token)
+                                   refresh_token=refresh_token, kind=kind, replaces=replaces)
     logger.info("Session issued  device=%s  role=%s  kind=%s", device_id, role, kind)
     return {
         "token": token,
@@ -137,14 +138,13 @@ def rotate_session(refresh_token: str) -> dict:
     found = device_registry.find_by_refresh(refresh_token)
     if found is None:
         raise PermissionError("invalid refresh token")
-    device_registry.revoke_token(found["jti"])
     dev = device_registry.get_device(found["device_id"])
     if dev is None or dev.get("revoked"):
         raise PermissionError("device is revoked")
     # Preserve the role the device logged in with (falls back to GUARD for
     # pre-existing devices that never stored one).
     role = dev.get("role") if dev.get("role") in ROLE_PERMISSIONS else "GUARD"
-    return issue_session(found["device_id"], role)
+    return issue_session(found["device_id"], role, replaces=found["jti"])
 
 
 def check_password(password: str) -> bool:

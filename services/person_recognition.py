@@ -18,7 +18,7 @@ consume these too).
 Env vars:
     SENTRA_RECOG_ENABLED        (default true)
     SENTRA_RECOG_BACKEND        (simple | simulation)
-    SENTRA_RECOG_MATCH_THRESH   (default 0.86 cosine similarity)
+    SENTRA_RECOG_MATCH_THRESH   (minimum and default 0.86 cosine similarity)
     SENTRA_RECOG_POLL_S         (default 0.2)
     SENTRA_RECOG_UNKNOWN_COOLDOWN_S (default 15)
     SENTRA_RECOG_SNAPSHOT_DIR   (default ~/sentra_snapshots/persons)
@@ -48,8 +48,12 @@ from services import safety_events
 RECOG_ENABLED = os.getenv("SENTRA_RECOG_ENABLED", "true").strip().lower() in (
     "1", "true", "yes", "on")
 RECOG_BACKEND = os.getenv("SENTRA_RECOG_BACKEND", "simple").strip().lower()
-MATCH_THRESH = float(os.getenv("SENTRA_RECOG_THRESHOLD",
-                               os.getenv("SENTRA_RECOG_MATCH_THRESH", "0.40")))
+MIN_MATCH_THRESH = 0.86
+MATCH_THRESH = max(
+    MIN_MATCH_THRESH,
+    float(os.getenv("SENTRA_RECOG_MATCH_THRESH",
+                    os.getenv("SENTRA_RECOG_THRESHOLD", str(MIN_MATCH_THRESH)))),
+)
 POLL_S = float(os.getenv("SENTRA_RECOG_POLL_S", "0.2"))
 UNKNOWN_COOLDOWN_S = float(os.getenv("SENTRA_RECOG_UNKNOWN_COOLDOWN_S", "15"))
 SNAPSHOT_DIR = os.path.expanduser(
@@ -58,6 +62,8 @@ FACE_SIZE = 32  # simple embedder input
 
 _haar = None
 _haar_failed = False
+_haar_lock = threading.Lock()
+_eye_cascade = None
 _last_unknown_at = 0.0
 _stats = {
     "frames_seen": 0,
@@ -121,31 +127,39 @@ def match_embedding(embedding: list[float]) -> Optional[dict]:
     """Best cosine match above threshold. Returns {person_key, name, similarity}."""
     from services import person_registry
     best = None
-    top_seen = None
+    top_score = -math.inf
+    top_name = None
     for key, name, ref in person_registry.all_embeddings():
         sim = cosine_similarity(embedding, ref)
-        if top_seen is None or sim > top_seen["similarity"]:
-            top_seen = {"person_key": key, "name": name, "similarity": round(sim, 3)}
-        if sim >= MATCH_THRESH and (best is None or sim > best["similarity"]):
+        if sim > top_score:
+            top_score = sim
+            top_name = name
             best = {"person_key": key, "name": name, "similarity": round(sim, 3)}
-    if top_seen:
-        logger.info("Face evaluated: best match '%s' score=%.3f (threshold=%.2f -> match=%s)",
-                    top_seen["name"], top_seen["similarity"], MATCH_THRESH, best is not None)
+    if top_name is not None:
+        logger.debug("Face evaluated: best match '%s' score=%.3f (threshold=%.2f)",
+                     top_name, top_score, MATCH_THRESH)
+    if top_score < MATCH_THRESH:
+        return None
     return best
 
 
 def crop_face_from_body_bbox(frame, bbox):
-    """Return the centered upper 30% of a full-body detection box."""
+    """Find a single face in the upper part of a tracked person box."""
     if frame is None or bbox is None:
         return None
     try:
         x, y, w, h = [int(round(float(v))) for v in bbox]
         height, width = frame.shape[:2]
         x0, x1 = max(0, x), min(width, x + w)
-        y0, y1 = max(0, y), min(height, y + max(1, int(h * 0.30)))
+        y0, y1 = max(0, y), min(height, y + max(1, int(h * 0.60)))
         if x1 <= x0 or y1 <= y0:
             return None
-        return frame[y0:y1, x0:x1]
+        region = frame[y0:y1, x0:x1]
+        faces = detect_faces(region)
+        if len(faces) != 1:
+            return None
+        fx, fy, fw, fh = faces[0]
+        return region[fy:fy + fh, fx:fx + fw]
     except (TypeError, ValueError, IndexError, AttributeError):
         return None
 
@@ -166,25 +180,54 @@ def recognize_body_bbox(frame, bbox) -> dict:
 
 def detect_faces(frame) -> list[tuple[int, int, int, int]]:
     """Haar frontal-face detection → [(x, y, w, h)]."""
-    cascade = _get_haar()
-    if cascade is None or frame is None:
+    if frame is None or not _CV_OK:
         return []
     try:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.equalizeHist(gray)
-        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3,
-                                         minSize=(32, 32))
+        with _haar_lock:
+            cascade = _get_haar()
+            if cascade is None:
+                return []
+            faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3,
+                                             minSize=(32, 32))
         return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in faces]
     except Exception as exc:
         logger.error("detect_faces error: %s", exc)
         return []
 
 
+def _has_eye_pair(face) -> bool:
+    """Confirm a close-up face when a full-body track is outside the frame."""
+    global _eye_cascade
+    if not _CV_OK:
+        return False
+    try:
+        gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
+        height, width = gray.shape
+        if min(height, width) < 64:
+            return False
+        with _haar_lock:
+            if _eye_cascade is None:
+                path = os.path.join(cv2.data.haarcascades,
+                                    "haarcascade_eye_tree_eyeglasses.xml")
+                _eye_cascade = cv2.CascadeClassifier(path)
+            eyes = _eye_cascade.detectMultiScale(
+                gray[:int(height * 0.65)], scaleFactor=1.1,
+                minNeighbors=4, minSize=(10, 10))
+        left = [(x + w / 2, y + h / 2) for x, y, w, h in eyes if x + w / 2 < width * 0.45]
+        right = [(x + w / 2, y + h / 2) for x, y, w, h in eyes if x + w / 2 > width * 0.55]
+        return any(abs(ly - ry) <= height * 0.18 and rx - lx >= width * 0.2
+                   for lx, ly in left for rx, ry in right)
+    except (AttributeError, cv2.error):
+        return False
+
+
 _rover_unknown_streaks: dict[int, tuple[int, float, bool]] = {}
 
 
 def _confirm_rover_unknown(boxes: list[tuple[int, int, int, int]],
-                           now: float) -> bool:
+                           now: float, closeup_confirmed: bool = False) -> bool:
     from services import person_detection
 
     for person_id, (_, seen, _) in list(_rover_unknown_streaks.items()):
@@ -193,7 +236,7 @@ def _confirm_rover_unknown(boxes: list[tuple[int, int, int, int]],
     if not boxes:
         return False
 
-    confirmed = False
+    candidates = set()
     for track in person_detection.get_tracked():
         if (track["age_s"] > 1.0 or track["frames"] < 2
                 or str(track.get("frame_id", "")).startswith("sim-")):
@@ -203,7 +246,11 @@ def _confirm_rover_unknown(boxes: list[tuple[int, int, int, int]],
                    and py <= y + h / 2 <= py + ph * 0.6
                    for x, y, w, h in boxes):
             continue
-        person_id = track["person_id"]
+        candidates.add(track["person_id"])
+    if not candidates and closeup_confirmed:
+        candidates.add(-1)
+    confirmed = False
+    for person_id in candidates:
         count, seen, reported = _rover_unknown_streaks.get(person_id, (0, 0.0, False))
         count = count + 1 if now - seen <= 1.5 else 1
         should_report = count >= 3 and not reported and now - _last_unknown_at >= UNKNOWN_COOLDOWN_S
@@ -225,6 +272,7 @@ def recognize_frame(frame, *, from_rover: bool = False) -> dict:
     unknown = 0
     unknown_crop = None
     unknown_boxes = []
+    closeup_confirmed = False
     now = time.time()
     for (x, y, w, h) in detect_faces(frame):
         crop = frame[max(0, y):y + h, max(0, x):x + w]
@@ -234,6 +282,8 @@ def recognize_frame(frame, *, from_rover: bool = False) -> dict:
             unknown += 1
             unknown_crop = crop
             unknown_boxes.append((x, y, w, h))
+            if from_rover and not closeup_confirmed:
+                closeup_confirmed = _has_eye_pair(crop)
         faces_out.append({
             "bbox": [x, y, w, h],
             "match": match,
@@ -243,7 +293,7 @@ def recognize_frame(frame, *, from_rover: bool = False) -> dict:
             _stats["faces_seen"] += 1
 
     if from_rover:
-        should_report = _confirm_rover_unknown(unknown_boxes, now)
+        should_report = _confirm_rover_unknown(unknown_boxes, now, closeup_confirmed)
     else:
         should_report = unknown > 0 and now - _last_unknown_at >= UNKNOWN_COOLDOWN_S
     if should_report:

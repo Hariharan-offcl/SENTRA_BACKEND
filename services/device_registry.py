@@ -162,10 +162,20 @@ def delete_device(device_id: str) -> bool:
 # ── Tokens (tracked by jti) ──────────────────────────────────────────────────
 
 def register_token(jti: str, device_id: str, ttl_s: int,
-                   refresh_token: str | None = None) -> None:
+                   refresh_token: str | None = None, *, kind: str | None = None,
+                   replaces: str | None = None) -> None:
     now = time.time()
     with _lock:
+        if replaces is not None and token_state(replaces) != "active":
+            raise PermissionError("session is no longer active")
+        if kind is not None:
+            for existing in _tokens.values():
+                existing_kind = existing.get("kind") or _devices.get(
+                    existing["device_id"], {}).get("kind", "user")
+                if existing_kind == kind and not existing["revoked"]:
+                    existing.update(revoked=True, revoked_at=now)
         _tokens[jti] = {
+            "kind": kind,
             "device_id": device_id,
             "issued_at": now,
             "last_seen": now,

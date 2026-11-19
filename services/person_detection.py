@@ -412,6 +412,8 @@ def _process_detections(detections: list[dict], frame_id: str,
             try:
                 from services import person_recognition
                 for pid, track in tracks.items():
+                    if track.get("frame_id") != frame_id:
+                        continue
                     identity = person_recognition.recognize_body_bbox(frame, track["bbox"])
                     current = _tracks.get(pid)
                     if current is not None:

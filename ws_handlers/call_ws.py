@@ -4,7 +4,7 @@ import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from services import call_service, emergency_call
+from services import call_service, device_registry, emergency_call
 from services.connection_manager import connection_manager
 
 router = APIRouter(tags=["WebSocket"])
@@ -26,7 +26,12 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
         return
     # Phase 4: token gate (?token=) - 4401 when enforced and missing/bad.
     from core import auth as core_auth
-    if await core_auth.verify_ws_token(websocket) is None:
+    ctx = await core_auth.verify_ws_token(websocket)
+    if ctx is None:
+        return
+    if core_auth.AUTH_ENFORCED and (ctx.kind == "node") != (role == "node"):
+        await websocket.accept()
+        await websocket.close(code=4401)
         return
 
     await connection_manager.connect(websocket, role=cm_role, user_id=role)
@@ -60,6 +65,9 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
     try:
         while True:
             raw_message = await websocket.receive_text()
+            if core_auth.AUTH_ENFORCED and device_registry.token_state(ctx.jti) != "active":
+                await websocket.close(code=4401)
+                break
             try:
                 message = json.loads(raw_message)
             except json.JSONDecodeError:
@@ -130,7 +138,12 @@ async def call_socket(websocket: WebSocket, role: str):
         return
     # Phase 4: token gate (?token=) - 4401 when enforced and missing/bad.
     from core import auth as core_auth
-    if await core_auth.verify_ws_token(websocket) is None:
+    ctx = await core_auth.verify_ws_token(websocket)
+    if ctx is None:
+        return
+    if core_auth.AUTH_ENFORCED and (ctx.kind == "node") != (role == "node"):
+        await websocket.accept()
+        await websocket.close(code=4401)
         return
 
     await connection_manager.connect(websocket, role=cm_role, user_id=role)
@@ -160,6 +173,9 @@ async def call_socket(websocket: WebSocket, role: str):
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
+                break
+            if core_auth.AUTH_ENFORCED and device_registry.token_state(ctx.jti) != "active":
+                await websocket.close(code=4401)
                 break
             if pull and message.get("text") == "latest":
                 await send_latest(reply=True)
