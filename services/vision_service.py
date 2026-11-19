@@ -61,12 +61,13 @@ def unsubscribe(name: str) -> None:
         _subscribers[:] = [s for s in _subscribers if s["name"] != name]
 
 
-def _latest_node_jpeg() -> bytes | None:
+def _latest_node_jpeg() -> tuple[bytes, float] | None:
     """Latest raw JPEG from the rover phone via the call path."""
     from services import call_service
     frame = call_service.node_frame
-    if frame and (time.time() - call_service.node_last_seen) < 5.0:
-        return frame
+    seen = call_service.node_last_seen
+    if frame and (time.time() - seen) < 2.0:
+        return frame, seen
     return None
 
 
@@ -79,11 +80,13 @@ def _decode(frame_bytes: bytes):
 
 
 def _sampler_loop() -> None:
+    last_seen = None
     while not _stop_event.is_set():
-        jpeg = _latest_node_jpeg()
-        if jpeg is None:
-            _stop_event.wait(0.25)
+        latest = _latest_node_jpeg()
+        if latest is None or latest[1] == last_seen:
+            _stop_event.wait(1.0 / SAMPLER_HZ)
             continue
+        jpeg, last_seen = latest
         try:
             frame = _decode(jpeg)
         except Exception as exc:

@@ -91,6 +91,8 @@ async def webrtc_signaling_socket(websocket: WebSocket, role: str):
                         logger.info("User sent 'ready' but rover not connected yet -- cached")
                 continue
 
+            if message_type == "bye" and role == "user":
+                _user_ready_since = 0.0
             forwarded = {"type": message_type, "from": role}
             if message_type in {"offer", "answer"}:
                 sdp = message.get("sdp")
@@ -132,28 +134,43 @@ async def call_socket(websocket: WebSocket, role: str):
         return
 
     await connection_manager.connect(websocket, role=cm_role, user_id=role)
-    call_service.call_clients[role].add(websocket)
+    pull = websocket.query_params.get("pull") == "1"
+    if not pull:
+        call_service.call_clients[role].add(websocket)
     peer_role = "user" if role == "node" else "node"
+    last_sent = None
 
-    # Give a newly connected phone the freshest peer frame immediately.
-    latest_peer_frame = call_service.user_frame if role == "node" else call_service.node_frame
-    latest_peer_seen = call_service.user_last_seen if role == "node" else call_service.node_last_seen
-
-    if (
-        latest_peer_frame
-        and time.time() - latest_peer_seen < 5
-        and call_service.is_valid_jpeg(latest_peer_frame)
-    ):
-        await websocket.send_bytes(latest_peer_frame)
+    async def send_latest(*, reply: bool = False):
+        nonlocal last_sent
+        frame, seen = ((call_service.user_frame, call_service.user_last_seen)
+                       if role == "node" else
+                       (call_service.node_frame, call_service.node_last_seen))
+        if (seen != last_sent and time.time() - seen < 2
+                and frame and call_service.is_valid_jpeg(frame)):
+            last_sent = seen
+            await websocket.send_bytes(frame)
+        elif reply:
+            await websocket.send_bytes(b"")
 
     try:
+        if pull:
+            await websocket.send_text("relay_pull")
+        else:
+            await send_latest()
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
                 break
+            if pull and message.get("text") == "latest":
+                await send_latest(reply=True)
+                continue
 
             frame = message.get("bytes")
-            if frame is None or not call_service.is_valid_jpeg(frame):
+            if frame is None:
+                continue
+            if not call_service.is_valid_jpeg(frame):
+                if pull:
+                    await websocket.send_text("uploaded")
                 continue
 
             if role == "node":
@@ -163,6 +180,8 @@ async def call_socket(websocket: WebSocket, role: str):
                 call_service.user_frame = frame
                 call_service.user_last_seen = time.time()
 
+            if pull:
+                await websocket.send_text("uploaded")
             await call_service.broadcast_frame(peer_role, frame)
 
     except WebSocketDisconnect:

@@ -237,7 +237,7 @@ async def _handle_camera_frame(ws: WebSocket, data: dict) -> None:
     except Exception:
         await send_event(ws, "error", {"code": "bad_frame_encoding"})
         return
-    if not jpeg.startswith(b"\xff\xd8"):
+    if not call_service.is_valid_jpeg(jpeg):
         await send_event(ws, "error", {"code": "not_a_jpeg"})
         return
     seq = data.get("sequence")
@@ -251,8 +251,7 @@ async def _handle_camera_frame(ws: WebSocket, data: dict) -> None:
         pass
     _rover_state["last_frame"] = time.time()
     _rover_state["camera_state"] = "ACTIVE"
-    # Re-encode + latest-frame buffer + broadcast to call peers + vision sampler.
-    await call_service.update_node_frame(jpeg)
+    await call_service.update_node_frame(jpeg, reencode=False)
 
 
 # ── Shared push loop (per connection) ────────────────────────────────────────

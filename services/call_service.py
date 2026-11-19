@@ -106,9 +106,9 @@ node_frame = generate_placeholder_frame("Awaiting Node (Phone A) feed...")
 user_frame = generate_placeholder_frame("Awaiting User (Phone B) feed...")
 
 
-async def update_node_frame(raw_bytes: bytes):
+async def update_node_frame(raw_bytes: bytes, *, reencode: bool = True):
     global node_frame, node_last_seen
-    node_frame = process_frame(raw_bytes)
+    node_frame = process_frame(raw_bytes) if reencode else raw_bytes
     node_last_seen = time.time()
     await broadcast_frame("user", node_frame) # Broadcast to peer
 

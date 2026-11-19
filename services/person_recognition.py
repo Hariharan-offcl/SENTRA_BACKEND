@@ -180,6 +180,38 @@ def detect_faces(frame) -> list[tuple[int, int, int, int]]:
         return []
 
 
+_rover_unknown_streaks: dict[int, tuple[int, float, bool]] = {}
+
+
+def _confirm_rover_unknown(boxes: list[tuple[int, int, int, int]],
+                           now: float) -> bool:
+    from services import person_detection
+
+    for person_id, (_, seen, _) in list(_rover_unknown_streaks.items()):
+        if now - seen > 3.0:
+            del _rover_unknown_streaks[person_id]
+    if not boxes:
+        return False
+
+    confirmed = False
+    for track in person_detection.get_tracked():
+        if (track["age_s"] > 1.0 or track["frames"] < 2
+                or str(track.get("frame_id", "")).startswith("sim-")):
+            continue
+        px, py, pw, ph = track["bbox"]
+        if not any(px <= x + w / 2 <= px + pw
+                   and py <= y + h / 2 <= py + ph * 0.6
+                   for x, y, w, h in boxes):
+            continue
+        person_id = track["person_id"]
+        count, seen, reported = _rover_unknown_streaks.get(person_id, (0, 0.0, False))
+        count = count + 1 if now - seen <= 1.5 else 1
+        should_report = count >= 3 and not reported and now - _last_unknown_at >= UNKNOWN_COOLDOWN_S
+        _rover_unknown_streaks[person_id] = (count, now, reported or should_report)
+        confirmed |= should_report
+    return confirmed
+
+
 def recognize_frame(frame, *, from_rover: bool = False) -> dict:
     """
     One-shot recognition on a full frame (used by POST /persons/recognize
@@ -192,6 +224,7 @@ def recognize_frame(frame, *, from_rover: bool = False) -> dict:
     faces_out = []
     unknown = 0
     unknown_crop = None
+    unknown_boxes = []
     now = time.time()
     for (x, y, w, h) in detect_faces(frame):
         crop = frame[max(0, y):y + h, max(0, x):x + w]
@@ -200,6 +233,7 @@ def recognize_frame(frame, *, from_rover: bool = False) -> dict:
         if match is None and embedding is not None:
             unknown += 1
             unknown_crop = crop
+            unknown_boxes.append((x, y, w, h))
         faces_out.append({
             "bbox": [x, y, w, h],
             "match": match,
@@ -208,7 +242,11 @@ def recognize_frame(frame, *, from_rover: bool = False) -> dict:
         with _stats_lock:
             _stats["faces_seen"] += 1
 
-    if unknown > 0 and (now - _last_unknown_at) >= UNKNOWN_COOLDOWN_S:
+    if from_rover:
+        should_report = _confirm_rover_unknown(unknown_boxes, now)
+    else:
+        should_report = unknown > 0 and now - _last_unknown_at >= UNKNOWN_COOLDOWN_S
+    if should_report:
         _last_unknown_at = now
         path = _save_unknown_snapshot(unknown_crop if unknown_crop is not None else frame)
         with _stats_lock:
