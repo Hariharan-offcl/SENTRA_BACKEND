@@ -48,7 +48,7 @@ from services import safety_events
 RECOG_ENABLED = os.getenv("SENTRA_RECOG_ENABLED", "true").strip().lower() in (
     "1", "true", "yes", "on")
 RECOG_BACKEND = os.getenv("SENTRA_RECOG_BACKEND", "simple").strip().lower()
-MIN_MATCH_THRESH = 0.82
+MIN_MATCH_THRESH = 0.50
 MATCH_THRESH = max(
     MIN_MATCH_THRESH,
     float(os.getenv("SENTRA_RECOG_MATCH_THRESH",
