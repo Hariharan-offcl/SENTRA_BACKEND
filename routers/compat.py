@@ -635,7 +635,7 @@ def dismiss_alert(alert_id: str):
 
 @router.post("/alerts/{alert_id}/mark-known")
 def mark_alert_person_known(alert_id: str, body: dict):
-    """Register the alert snapshot as a known person and dismiss the alert."""
+    """Save a labeled alert snapshot to the person's enrollment."""
     name = str((body or {}).get("name", "")).strip()
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
@@ -646,28 +646,34 @@ def mark_alert_person_known(alert_id: str, body: dict):
         raise HTTPException(status_code=409, detail="alert has no snapshot")
 
     import cv2
-    import numpy as np
-    from services import person_registry, person_recognition
+    from services import notification_service, person_registry, person_recognition
 
     path = os.path.join(person_recognition.SNAPSHOT_DIR, os.path.basename(image_file))
     frame = cv2.imread(path)
     if frame is None:
         raise HTTPException(status_code=404, detail="snapshot file missing")
-    faces = person_recognition.detect_faces(frame)
-    if not faces:
-        raise HTTPException(status_code=400, detail="no face found in alert snapshot")
+    # Recognition already saved the face crop for PERSON_UNKNOWN. Cropping
+    # again changes its framing and can stop Haar finding the face at all.
+    if notification.get("event_type") == "PERSON_UNKNOWN":
+        crop = frame
+    else:
+        faces = person_recognition.detect_faces(frame)
+        if len(faces) != 1:
+            raise HTTPException(status_code=400, detail="snapshot must contain one face")
+        x, y, w, h = faces[0]
+        crop = frame[y:y + h, x:x + w]
 
-    embeddings = []
-    for x, y, w, h in faces:
-        crop = frame[max(0, y):y + h, max(0, x):x + w]
-        embedding = person_recognition.embed_face(crop)
-        if embedding:
-            embeddings.append(embedding)
-    if not embeddings:
+    embedding = person_recognition.embed_face(crop)
+    if not embedding:
         raise HTTPException(status_code=400, detail="no usable face found")
+
     try:
-        record = person_registry.add_person(name, embeddings, snapshot_path=path)
-    except ValueError as exc:
+        person = person_registry.find_by_name(name)
+        if person is None:
+            record = person_registry.add_person(name, [embedding], snapshot_path=path)
+        else:
+            record = person_registry.add_embedding(person["person_key"], embedding)
+    except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
     notification_service.ack(alert_id)
