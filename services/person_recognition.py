@@ -18,7 +18,7 @@ consume these too).
 Env vars:
     SENTRA_RECOG_ENABLED        (default true)
     SENTRA_RECOG_BACKEND        (simple | simulation)
-    SENTRA_RECOG_MATCH_THRESH   (minimum and default 0.86 cosine similarity)
+    SENTRA_RECOG_MATCH_THRESH   (minimum and default 0.82 cosine similarity)
     SENTRA_RECOG_POLL_S         (default 0.2)
     SENTRA_RECOG_UNKNOWN_COOLDOWN_S (default 15)
     SENTRA_RECOG_SNAPSHOT_DIR   (default ~/sentra_snapshots/persons)
@@ -48,7 +48,7 @@ from services import safety_events
 RECOG_ENABLED = os.getenv("SENTRA_RECOG_ENABLED", "true").strip().lower() in (
     "1", "true", "yes", "on")
 RECOG_BACKEND = os.getenv("SENTRA_RECOG_BACKEND", "simple").strip().lower()
-MIN_MATCH_THRESH = 0.86
+MIN_MATCH_THRESH = 0.82
 MATCH_THRESH = max(
     MIN_MATCH_THRESH,
     float(os.getenv("SENTRA_RECOG_MATCH_THRESH",
@@ -336,8 +336,8 @@ def _on_frame(frame, frame_id: str) -> None:
 
 
 def _worker_loop() -> None:
-    logger.info("Person recognition worker started (backend=%s, poll=%.2fs)",
-                RECOG_BACKEND, POLL_S)
+    logger.info("Person recognition worker started (backend=%s, poll=%.2fs, match_threshold=%.2f)",
+                RECOG_BACKEND, POLL_S, MATCH_THRESH)
     while not _stop_event.is_set():
         try:
             frame, _fid = _queue.popleft()
